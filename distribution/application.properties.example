@@ -1,0 +1,47 @@
+# ============================================================
+# Xiaovv / V380
+# Configuration exemple
+# ============================================================
+
+
+# ============================================================
+# RTSP
+# ============================================================
+
+rtsp.bind-address=0.0.0.0
+rtsp.port=8555
+
+
+# ============================================================
+# API HTTP
+# ============================================================
+
+api.bind-address=0.0.0.0
+api.port=8080
+
+# Nom de la variable d'environnement.
+# NE PAS mettre le jeton réel ici.
+api.token-env=XIAOVV_API_TOKEN
+
+
+# ============================================================
+# CAMÉRA EXEMPLE
+# ============================================================
+
+camera.example.enabled=true
+
+# Facultatif : si absent, l'ID "example" devient le nom du stream.
+camera.example.stream-name=example
+
+camera.example.host=192.168.1.100
+camera.example.port=8800
+
+camera.example.device-id=XXXXXXXX
+camera.example.username=XXXXXXXX
+
+# Nom de la variable d'environnement.
+# NE PAS mettre le mot de passe réel ici.
+camera.example.password-env=XIAOVV_CAMERA_EXAMPLE_PASSWORD
+
+camera.example.resolution=high
+camera.example.reconnect-delay-ms=5000

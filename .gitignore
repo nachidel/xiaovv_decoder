@@ -1,47 +1,60 @@
-.gradle
-build/
-!gradle/wrapper/gradle-wrapper.jar
-!**/src/main/**/build/
-!**/src/test/**/build/
+# ============================================================
+# Gradle
+# ============================================================
 
-### IntelliJ IDEA ###
-.idea/modules.xml
-.idea/jarRepositories.xml
-.idea/compiler.xml
-.idea/libraries/
-*.iws
+.gradle/
+build/
+out/
+
+# ============================================================
+# IntelliJ IDEA
+# ============================================================
+
+.idea/
 *.iml
 *.ipr
-out/
-!**/src/main/**/out/
-!**/src/test/**/out/
+*.iws
 
-### Kotlin ###
-.kotlin
+# ============================================================
+# Configuration locale / secrets
+# ============================================================
 
-### Eclipse ###
-.apt_generated
-.classpath
-.factorypath
-.project
-.settings
-.springBeans
-.sts4-cache
-bin/
-!**/src/main/**/bin/
-!**/src/test/**/bin/
+.env
+.env.*
+!.env.example
 
-### NetBeans ###
-/nbproject/private/
-/nbbuild/
-/dist/
-/nbdist/
-/.nb-gradle/
+**/application.properties
+!**/application.properties.example
 
-### VS Code ###
-.vscode/
+**/xiaovv-env.bat
+**/xiaovv-env.ps1
+**/xiaovv-env.sh
 
-### Mac OS ###
+!**/xiaovv-env.example.bat
+!**/xiaovv-env.example.ps1
+!**/xiaovv-env.example.sh
+
+local.properties
+
+# ============================================================
+# Logs
+# ============================================================
+
+*.log
+logs/
+
+# ============================================================
+# Captures réseau
+# ============================================================
+
+*.pcap
+*.pcapng
+captures/
+
+# ============================================================
+# OS
+# ============================================================
+
 .DS_Store
-
-.idea
+Thumbs.db
+desktop.ini
