@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<configuration>
+
+    <appender name="CONSOLE"
+              class="ch.qos.logback.core.ConsoleAppender">
+
+        <encoder>
+            <pattern>%gray(%d{HH:mm:ss.SSS}) %highlight(%-5level) %cyan(%-20logger{20}) %gray(-) %msg%n</pattern>
+        </encoder>
+
+    </appender>
+
+    <!-- Niveau normal -->
+    <root level="${LOG_LEVEL:-INFO}">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+
+</configuration>
