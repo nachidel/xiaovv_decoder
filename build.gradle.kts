@@ -598,10 +598,7 @@ val packageLinux =
             println(" Package Linux autonome Xiaovv cree")
             println("============================================================")
             println("Architecture : $linuxArch")
-            println(
-                "TAR.GZ       : " +
-                        archiveFile.get().asFile.absolutePath
-            )
+            println("TAR.GZ       : " + archiveFile.get().asFile.absolutePath)
             println("Java         : embarque")
             println("============================================================")
             println()
