@@ -1,5 +1,6 @@
 package fr.nachidel.xiaovv.rtsp
 
+import fr.nachidel.xiaovv.h265.H265AnnexB
 import fr.nachidel.xiaovv.logging.logger
 import fr.nachidel.xiaovv.v380.V380MediaDecoder
 import fr.nachidel.xiaovv.v380.V380Stream
@@ -7,12 +8,13 @@ import java.io.Closeable
 import java.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
-import fr.nachidel.xiaovv.h265.H265AnnexB
 
 class RtspStream(
     val name: String,
     val fps: Int = 20
-) : V380Stream.FrameListener, Closeable {
+) : V380Stream.FrameListener,
+    V380Stream.AudioFrameListener,
+    Closeable {
 
     private val log =
         logger<RtspStream>()
@@ -20,11 +22,23 @@ class RtspStream(
     private val active =
         AtomicBoolean(true)
 
-    /*
-     * ============================================================
-     * LISTENERS RTSP
-     * ============================================================
-     */
+    companion object {
+        const val VIDEO_PAYLOAD_TYPE = 96
+        const val AUDIO_PAYLOAD_TYPE = 97
+
+        private const val DEFAULT_AUDIO_SAMPLE_RATE = 16_000
+        private const val DEFAULT_AUDIO_CHANNELS = 1
+
+        /*
+         * AAC LC / 16 kHz / mono : AudioSpecificConfig = 0x1408.
+         * Valeur confirmée par la capture Xiaovv.
+         */
+        private val DEFAULT_AUDIO_CONFIG =
+            byteArrayOf(
+                0x14,
+                0x08
+            )
+    }
 
     fun interface AccessUnitListener {
 
@@ -34,14 +48,18 @@ class RtspStream(
         )
     }
 
+    fun interface AudioAccessUnitListener {
+
+        fun onAudioAccessUnit(
+            frame: V380MediaDecoder.DecodedAudioFrame
+        )
+    }
+
     private val listeners =
         CopyOnWriteArrayList<AccessUnitListener>()
 
-    /*
-     * ============================================================
-     * VPS / SPS / PPS
-     * ============================================================
-     */
+    private val audioListeners =
+        CopyOnWriteArrayList<AudioAccessUnitListener>()
 
     private val parameterLock =
         Any()
@@ -55,11 +73,17 @@ class RtspStream(
     private var cachedPps: ByteArray? =
         null
 
-    /*
-     * ============================================================
-     * FRAMES V380
-     * ============================================================
-     */
+    private var audioSampleRate =
+        DEFAULT_AUDIO_SAMPLE_RATE
+
+    private var audioChannels =
+        DEFAULT_AUDIO_CHANNELS
+
+    private var audioObjectType =
+        2
+
+    private var audioSpecificConfig =
+        DEFAULT_AUDIO_CONFIG.copyOf()
 
     override fun onFrame(
         frame: V380MediaDecoder.DecodedVideoFrame
@@ -94,7 +118,7 @@ class RtspStream(
             } catch (e: Exception) {
 
                 log.warn(
-                    "Erreur listener RTSP '{}' : {}",
+                    "Erreur listener vidéo RTSP '{}' : {}",
                     name,
                     e.message
                 )
@@ -102,11 +126,36 @@ class RtspStream(
         }
     }
 
-    /*
-     * ============================================================
-     * PARAMETER SETS
-     * ============================================================
-     */
+    override fun onAudioFrame(
+        frame: V380MediaDecoder.DecodedAudioFrame
+    ) {
+
+        if (!active.get()) {
+            return
+        }
+
+        updateAudioParameters(
+            frame
+        )
+
+        for (listener in audioListeners) {
+
+            try {
+
+                listener.onAudioAccessUnit(
+                    frame
+                )
+
+            } catch (e: Exception) {
+
+                log.warn(
+                    "Erreur listener audio RTSP '{}' : {}",
+                    name,
+                    e.message
+                )
+            }
+        }
+    }
 
     private fun updateParameterSets(
         nals: List<H265AnnexB.NalUnit>
@@ -182,11 +231,49 @@ class RtspStream(
         }
     }
 
-    /*
-     * ============================================================
-     * SDP
-     * ============================================================
-     */
+    private fun updateAudioParameters(
+        frame: V380MediaDecoder.DecodedAudioFrame
+    ) {
+
+        synchronized(parameterLock) {
+
+            val changed =
+                audioSampleRate != frame.sampleRate ||
+                        audioChannels != frame.channels ||
+                        audioObjectType != frame.audioObjectType ||
+                        !audioSpecificConfig.contentEquals(
+                            frame.audioSpecificConfig
+                        )
+
+            audioSampleRate =
+                frame.sampleRate
+
+            audioChannels =
+                frame.channels
+
+            audioObjectType =
+                frame.audioObjectType
+
+            audioSpecificConfig =
+                frame.audioSpecificConfig.copyOf()
+
+            if (changed) {
+
+                log.info(
+                    "[{}] AAC détecté : objectType={}, {} Hz, {} canal(aux), config={}",
+                    name,
+                    audioObjectType,
+                    audioSampleRate,
+                    audioChannels,
+                    audioSpecificConfig.joinToString("") {
+                        "%02X".format(
+                            it.toInt() and 0xFF
+                        )
+                    }
+                )
+            }
+        }
+    }
 
     fun buildSdp(
         serverIp: String
@@ -195,6 +282,9 @@ class RtspStream(
         val vps: ByteArray?
         val sps: ByteArray?
         val pps: ByteArray?
+        val sampleRate: Int
+        val channels: Int
+        val configHex: String
 
         synchronized(parameterLock) {
 
@@ -206,6 +296,19 @@ class RtspStream(
 
             pps =
                 cachedPps?.copyOf()
+
+            sampleRate =
+                audioSampleRate
+
+            channels =
+                audioChannels
+
+            configHex =
+                audioSpecificConfig.joinToString("") {
+                    "%02X".format(
+                        it.toInt() and 0xFF
+                    )
+                }
         }
 
         val base64 =
@@ -214,38 +317,15 @@ class RtspStream(
         return buildString {
 
             append("v=0\r\n")
+            append("o=- 0 0 IN IP4 $serverIp\r\n")
+            append("s=Xiaovv $name\r\n")
+            append("c=IN IP4 $serverIp\r\n")
+            append("t=0 0\r\n")
+            append("a=control:*\r\n")
 
-            append(
-                "o=- 0 0 IN IP4 $serverIp\r\n"
-            )
-
-            append(
-                "s=Xiaovv $name\r\n"
-            )
-
-            append(
-                "c=IN IP4 $serverIp\r\n"
-            )
-
-            append(
-                "t=0 0\r\n"
-            )
-
-            append(
-                "a=control:*\r\n"
-            )
-
-            append(
-                "m=video 0 RTP/AVP 96\r\n"
-            )
-
-            append(
-                "a=rtpmap:96 H265/90000\r\n"
-            )
-
-            append(
-                "a=framerate:$fps\r\n"
-            )
+            append("m=video 0 RTP/AVP $VIDEO_PAYLOAD_TYPE\r\n")
+            append("a=rtpmap:$VIDEO_PAYLOAD_TYPE H265/90000\r\n")
+            append("a=framerate:$fps\r\n")
 
             if (
                 vps != null &&
@@ -253,34 +333,35 @@ class RtspStream(
                 pps != null
             ) {
 
-                append(
-                    "a=fmtp:96 "
-                )
-
-                append(
-                    "sprop-vps=${base64.encodeToString(vps)};"
-                )
-
-                append(
-                    "sprop-sps=${base64.encodeToString(sps)};"
-                )
-
-                append(
-                    "sprop-pps=${base64.encodeToString(pps)}\r\n"
-                )
+                append("a=fmtp:$VIDEO_PAYLOAD_TYPE ")
+                append("sprop-vps=${base64.encodeToString(vps)};")
+                append("sprop-sps=${base64.encodeToString(sps)};")
+                append("sprop-pps=${base64.encodeToString(pps)}\r\n")
             }
 
+            append("a=control:trackID=0\r\n")
+
+            /*
+             * RFC 3640 : AAC MPEG4-GENERIC, un Access Unit par paquet RTP.
+             */
+            append("m=audio 0 RTP/AVP $AUDIO_PAYLOAD_TYPE\r\n")
             append(
-                "a=control:trackID=0\r\n"
+                "a=rtpmap:$AUDIO_PAYLOAD_TYPE " +
+                        "MPEG4-GENERIC/$sampleRate/$channels\r\n"
             )
+            append(
+                "a=fmtp:$AUDIO_PAYLOAD_TYPE " +
+                        "streamtype=5;" +
+                        "profile-level-id=1;" +
+                        "mode=AAC-hbr;" +
+                        "config=$configHex;" +
+                        "sizelength=13;" +
+                        "indexlength=3;" +
+                        "indexdeltalength=3\r\n"
+            )
+            append("a=control:trackID=1\r\n")
         }
     }
-
-    /*
-     * ============================================================
-     * LISTENERS
-     * ============================================================
-     */
 
     fun addListener(
         listener: AccessUnitListener
@@ -300,23 +381,42 @@ class RtspStream(
         )
     }
 
-    fun listenerCount(): Int {
+    fun addAudioListener(
+        listener: AudioAccessUnitListener
+    ) {
 
+        audioListeners.addIfAbsent(
+            listener
+        )
+    }
+
+    fun removeAudioListener(
+        listener: AudioAccessUnitListener
+    ) {
+
+        audioListeners.remove(
+            listener
+        )
+    }
+
+    fun listenerCount(): Int {
         return listeners.size
+    }
+
+    fun audioListenerCount(): Int {
+        return audioListeners.size
     }
 
     override fun close() {
 
-        if (
-            !active.getAndSet(false)
-        ) {
+        if (!active.getAndSet(false)) {
             return
         }
 
         listeners.clear()
+        audioListeners.clear()
 
         synchronized(parameterLock) {
-
             cachedVps = null
             cachedSps = null
             cachedPps = null

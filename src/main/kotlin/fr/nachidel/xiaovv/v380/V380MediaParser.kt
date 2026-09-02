@@ -33,11 +33,44 @@ class V380MediaParser {
          */
         const val MAX_FRAGMENT_PAYLOAD = 500
 
+        /**
+         * Garde-fou contre un faux header trouvé pendant une
+         * resynchronisation.
+         *
+         * 4096 fragments de 500 octets permettent déjà une frame
+         * théorique d'environ 2 Mo, très au-dessus de ce que nous
+         * observons actuellement.
+         */
+        const val MAX_TOTAL_FRAGMENTS = 4096
+
+        /**
+         * Nombre maximal d'octets que l'on accepte de parcourir
+         * pour retrouver un header V380 cohérent.
+         *
+         * Si aucune synchronisation n'est retrouvée dans cette
+         * fenêtre, V380Stream abandonnera cette connexion et le
+         * CameraSupervisor en ouvrira une nouvelle.
+         */
+        const val MAX_RESYNC_BYTES = 64 * 1024
+
+        /**
+         * Protection mémoire en cas de flux fortement corrompu.
+         */
+        const val MAX_PENDING_ASSEMBLIES = 512
+
         /*
          * Types observés sur notre Xiaovv.
          */
         const val TYPE_VIDEO_28 = 0x28
         const val TYPE_VIDEO_29 = 0x29
+
+        /**
+         * Type audio observé dans la capture de notre Xiaovv.
+         *
+         * Après déchiffrement, la charge utile contient une frame
+         * AAC LC / ADTS à 16 kHz mono.
+         */
+        const val TYPE_AUDIO_18 = 0x18
 
         /**
          * Autre type observé dans le flux.
@@ -83,6 +116,10 @@ class V380MediaParser {
             get() =
                 type == TYPE_VIDEO_28 ||
                         type == TYPE_VIDEO_29
+
+        val isAudio: Boolean
+            get() =
+                type == TYPE_AUDIO_18
 
         /**
          * Sur les trames vidéo récentes observées,
@@ -139,84 +176,25 @@ class V380MediaParser {
     ): Fragment {
 
         /*
-         * Important :
-         *
          * TCP ne respecte pas les limites des paquets.
          *
-         * On lit donc EXACTEMENT :
-         *
-         * 12 octets de header
-         * puis
-         * payloadLength octets.
+         * On lit normalement exactement 12 octets de header.
+         * Si le flux est décalé, readSynchronizedHeader() fait
+         * glisser une fenêtre octet par octet jusqu'au prochain
+         * header V380 cohérent.
          */
-
         val headerBytes =
-            readExact(
-                input,
-                HEADER_SIZE
+            readSynchronizedHeader(
+                input
             )
 
-        /*
-         * Synchronisation du protocole.
-         */
-        val magic =
-            headerBytes[0].toInt() and 0xFF
-
-        if (magic != MAGIC) {
-
-            throw IllegalStateException(
-                "Header média invalide : " +
-                        "magic=0x${magic.toString(16).uppercase()} " +
-                        "au lieu de 0x7F. " +
-                        "Header=${V380Protocol.hex(headerBytes)}"
+        val header =
+            decodeHeader(
+                headerBytes
             )
-        }
-
-        val type =
-            headerBytes[1].toInt() and 0xFF
-
-        val sequence =
-            headerBytes[2].toInt() and 0xFF
-
-        val totalFragments =
-            V380Protocol.readUInt16LE(
-                headerBytes,
-                3
-            )
-
-        val fragmentIndex =
-            V380Protocol.readUInt16LE(
-                headerBytes,
-                5
-            )
-
-        val payloadLength =
-            V380Protocol.readUInt16LE(
-                headerBytes,
-                7
-            )
-
-        /*
-         * Contrôles de cohérence.
-         */
-        require(totalFragments > 0) {
-            "Nombre de fragments invalide : $totalFragments"
-        }
-
-        require(fragmentIndex < totalFragments) {
-            "Index de fragment invalide : " +
-                    "$fragmentIndex/$totalFragments"
-        }
-
-        require(
-            payloadLength in 0..MAX_FRAGMENT_PAYLOAD
-        ) {
-            "Taille de fragment invalide : " +
-                    "$payloadLength octets"
-        }
 
         val payload =
-            if (payloadLength == 0) {
+            if (header.payloadLength == 0) {
 
                 ByteArray(0)
 
@@ -224,36 +202,231 @@ class V380MediaParser {
 
                 readExact(
                     input,
-                    payloadLength
+                    header.payloadLength
                 )
             }
-
-        val header =
-            FragmentHeader(
-                type = type,
-                sequence = sequence,
-                totalFragments = totalFragments,
-                fragmentIndex = fragmentIndex,
-                payloadLength = payloadLength
-            )
 
         log.trace(
             "MEDIA fragment : " +
                     "type=0x{}, seq={}, fragment={}/{}, payload={} octets",
-            type
+            header.type
                 .toString(16)
                 .uppercase()
                 .padStart(2, '0'),
-            sequence,
-            fragmentIndex + 1,
-            totalFragments,
-            payloadLength
+            header.sequence,
+            header.fragmentIndex + 1,
+            header.totalFragments,
+            header.payloadLength
         )
 
         return Fragment(
             header = header,
             payload = payload
         )
+    }
+
+    /*
+     * ============================================================
+     * SYNCHRONISATION DU FLUX
+     * ============================================================
+     */
+
+    private fun readSynchronizedHeader(
+        input: InputStream
+    ): ByteArray {
+
+        val window =
+            readExact(
+                input,
+                HEADER_SIZE
+            )
+
+        if (isPlausibleHeader(window)) {
+            return window
+        }
+
+        val firstMagic =
+            window[0].toInt() and 0xFF
+
+        log.warn(
+            "MEDIA désynchronisé : header invalide " +
+                    "(magic=0x{}, header={}). " +
+                    "Recherche du prochain header V380...",
+            firstMagic
+                .toString(16)
+                .uppercase()
+                .padStart(2, '0'),
+            V380Protocol.hex(window)
+        )
+
+        /*
+         * Tout assemblage en cours est désormais suspect :
+         * un ou plusieurs octets / fragments ont été perdus.
+         */
+        clearAssemblies()
+
+        var skippedBytes = 0
+
+        while (skippedBytes < MAX_RESYNC_BYTES) {
+
+            System.arraycopy(
+                window,
+                1,
+                window,
+                0,
+                HEADER_SIZE - 1
+            )
+
+            val next =
+                input.read()
+
+            if (next < 0) {
+
+                throw EOFException(
+                    "Connexion fermée pendant la resynchronisation média " +
+                            "après $skippedBytes octets ignorés"
+                )
+            }
+
+            window[HEADER_SIZE - 1] =
+                next.toByte()
+
+            skippedBytes++
+
+            if (isPlausibleHeader(window)) {
+
+                val header =
+                    decodeHeader(
+                        window
+                    )
+
+                log.warn(
+                    "MEDIA resynchronisé après {} octet(s) ignoré(s) : " +
+                            "type=0x{}, seq={}, fragment={}/{}, payload={} octets",
+                    skippedBytes,
+                    header.type
+                        .toString(16)
+                        .uppercase()
+                        .padStart(2, '0'),
+                    header.sequence,
+                    header.fragmentIndex + 1,
+                    header.totalFragments,
+                    header.payloadLength
+                )
+
+                return window.copyOf()
+            }
+        }
+
+        throw IllegalStateException(
+            "Impossible de resynchroniser le flux média V380 " +
+                    "après $MAX_RESYNC_BYTES octets"
+        )
+    }
+
+    private fun isPlausibleHeader(
+        bytes: ByteArray
+    ): Boolean {
+
+        if (bytes.size != HEADER_SIZE) {
+            return false
+        }
+
+        val magic =
+            bytes[0].toInt() and 0xFF
+
+        if (magic != MAGIC) {
+            return false
+        }
+
+        val totalFragments =
+            V380Protocol.readUInt16LE(
+                bytes,
+                3
+            )
+
+        if (
+            totalFragments !in
+            1..MAX_TOTAL_FRAGMENTS
+        ) {
+            return false
+        }
+
+        val fragmentIndex =
+            V380Protocol.readUInt16LE(
+                bytes,
+                5
+            )
+
+        if (
+            fragmentIndex !in
+            0 until totalFragments
+        ) {
+            return false
+        }
+
+        val payloadLength =
+            V380Protocol.readUInt16LE(
+                bytes,
+                7
+            )
+
+        if (
+            payloadLength !in
+            0..MAX_FRAGMENT_PAYLOAD
+        ) {
+            return false
+        }
+
+        return true
+    }
+
+    private fun decodeHeader(
+        bytes: ByteArray
+    ): FragmentHeader {
+
+        require(isPlausibleHeader(bytes)) {
+            "Header média V380 incohérent : ${V380Protocol.hex(bytes)}"
+        }
+
+        return FragmentHeader(
+            type =
+                bytes[1].toInt() and 0xFF,
+
+            sequence =
+                bytes[2].toInt() and 0xFF,
+
+            totalFragments =
+                V380Protocol.readUInt16LE(
+                    bytes,
+                    3
+                ),
+
+            fragmentIndex =
+                V380Protocol.readUInt16LE(
+                    bytes,
+                    5
+                ),
+
+            payloadLength =
+                V380Protocol.readUInt16LE(
+                    bytes,
+                    7
+                )
+        )
+    }
+
+    private fun clearAssemblies() {
+
+        if (assemblies.isNotEmpty()) {
+
+            log.debug(
+                "MEDIA abandon de {} assemblage(s) incomplet(s)",
+                assemblies.size
+            )
+
+            assemblies.clear()
+        }
     }
 
     /*
@@ -301,49 +474,61 @@ class V380MediaParser {
             assemblies.remove(key)
         }
 
-        val assembly =
-            assemblies.getOrPut(key) {
+        if (
+            assemblies.size >=
+            MAX_PENDING_ASSEMBLIES &&
+            !assemblies.containsKey(key)
+        ) {
 
-                log.debug(
-                    "MEDIA nouvelle frame : " +
-                            "type=0x{}, seq={}, fragments={}",
-                    header.type
-                        .toString(16)
-                        .uppercase()
-                        .padStart(2, '0'),
-                    header.sequence,
-                    header.totalFragments
+            log.warn(
+                "MEDIA trop d'assemblages incomplets ({}), remise à zéro",
+                assemblies.size
+            )
+
+            assemblies.clear()
+        }
+
+        var assembly =
+            assemblies[key]
+
+        if (assembly == null) {
+
+            assembly =
+                createAssembly(
+                    header
                 )
 
-                Assembly(
-                    totalFragments =
-                        header.totalFragments,
-
-                    fragments =
-                        arrayOfNulls(
-                            header.totalFragments
-                        )
-                )
-            }
+            assemblies[key] =
+                assembly
+        }
 
         /*
          * Tous les fragments d'une même frame doivent
          * annoncer le même nombre total.
+         *
+         * Une incohérence locale ne justifie plus de couper la
+         * connexion entière : on abandonne uniquement cette frame.
          */
         if (
             assembly.totalFragments !=
             header.totalFragments
         ) {
 
+            log.warn(
+                "MEDIA frame incohérente abandonnée : " +
+                        "type=0x{}, seq={}, fragments {} -> {}",
+                header.type
+                    .toString(16)
+                    .uppercase()
+                    .padStart(2, '0'),
+                header.sequence,
+                assembly.totalFragments,
+                header.totalFragments
+            )
+
             assemblies.remove(key)
 
-            throw IllegalStateException(
-                "Nombre de fragments incohérent pour " +
-                        "type=0x${header.type.toString(16)}, " +
-                        "seq=${header.sequence} : " +
-                        "${assembly.totalFragments} -> " +
-                        "${header.totalFragments}"
-            )
+            return null
         }
 
         /*
@@ -361,6 +546,7 @@ class V380MediaParser {
                 fragment.payload
 
             assembly.receivedFragments++
+
         } else {
 
             log.debug(
@@ -395,15 +581,19 @@ class V380MediaParser {
 
             if (part == null) {
 
-                /*
-                 * Ne devrait pas arriver puisque
-                 * receivedFragments == totalFragments.
-                 */
                 assemblies.remove(key)
 
-                throw IllegalStateException(
-                    "Frame marquée complète mais fragment absent"
+                log.warn(
+                    "MEDIA frame complète incohérente abandonnée : " +
+                            "fragment absent, type=0x{}, seq={}",
+                    header.type
+                        .toString(16)
+                        .uppercase()
+                        .padStart(2, '0'),
+                    header.sequence
                 )
+
+                return null
             }
 
             totalSize += part.size
@@ -421,9 +611,7 @@ class V380MediaParser {
 
             val current =
                 part
-                    ?: throw IllegalStateException(
-                        "Fragment absent"
-                    )
+                    ?: return null
 
             current.copyInto(
                 destination = data,
@@ -468,9 +656,48 @@ class V380MediaParser {
                 frame.fragmentCount,
                 frame.data.size
             )
+
+        } else if (frame.isAudio) {
+
+            log.trace(
+                "AUDIO frame reçue : " +
+                        "type=0x{}, {} fragments, {} octets",
+                frame.type
+                    .toString(16)
+                    .uppercase()
+                    .padStart(2, '0'),
+                frame.fragmentCount,
+                frame.data.size
+            )
         }
 
         return frame
+    }
+
+    private fun createAssembly(
+        header: FragmentHeader
+    ): Assembly {
+
+        log.debug(
+            "MEDIA nouvelle frame : " +
+                    "type=0x{}, seq={}, fragments={}",
+            header.type
+                .toString(16)
+                .uppercase()
+                .padStart(2, '0'),
+            header.sequence,
+            header.totalFragments
+        )
+
+        return Assembly(
+            totalFragments =
+                header.totalFragments,
+
+            fragments =
+                arrayOfNulls(
+                    header.totalFragments
+                )
+        )
     }
 
     /*

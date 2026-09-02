@@ -59,60 +59,85 @@ class CameraSupervisor(
         )
     }
 
+    /*
+     * ============================================================
+     * BOUCLE DE SUPERVISION
+     * ============================================================
+     *
+     * Principe :
+     *
+     * - aucune limite de tentatives ;
+     * - un nouveau V380Client est créé à chaque reconnexion ;
+     * - toute ancienne socket est fermée avant de repartir ;
+     * - une erreur d'une caméra ne touche jamais les autres ;
+     * - tant que close() n'a pas été appelé, on réessaie.
+     */
     private fun runLoop() {
+
+        val resolution =
+            when (
+                config.resolution
+            ) {
+
+                CameraResolution.LOW ->
+                    V380Protocol.RESOLUTION_LOW
+
+                CameraResolution.HIGH ->
+                    V380Protocol.RESOLUTION_HIGH
+            }
+
+        var attempt = 0L
 
         while (
             running.get()
         ) {
 
-            val resolution =
-                when (
-                    config.resolution
-                ) {
-
-                    CameraResolution.LOW ->
-                        V380Protocol.RESOLUTION_LOW
-
-                    CameraResolution.HIGH ->
-                        V380Protocol.RESOLUTION_HIGH
-                }
-
-            val client =
-                V380Client(
-                    host =
-                        config.host,
-
-                    port =
-                        config.port,
-
-                    deviceId =
-                        config.deviceId,
-
-                    username =
-                        config.username,
-
-                    password =
-                        config.password,
-
-                    videoResolution =
-                        resolution
-                )
-
-            currentClient.set(
-                client
-            )
-
-            client.addVideoListener(
-                rtspStream
-            )
+            var client: V380Client? =
+                null
 
             try {
 
+                attempt++
+
+                client =
+                    V380Client(
+                        host =
+                            config.host,
+
+                        port =
+                            config.port,
+
+                        deviceId =
+                            config.deviceId,
+
+                        username =
+                            config.username,
+
+                        password =
+                            config.password,
+
+                        videoResolution =
+                            resolution
+                    )
+
+                currentClient.set(
+                    client
+                )
+
+                client.addVideoListener(
+                    rtspStream
+                )
+
+                client.addAudioListener(
+                    rtspStream
+                )
+
                 log.info(
-                    "[{}] connexion à {}:{}",
+                    "[{}] connexion à {}:{} (tentative {})",
                     config.id,
                     config.host,
-                    config.port
+                    config.port,
+                    attempt
                 )
 
                 client.connect()
@@ -127,6 +152,17 @@ class CameraSupervisor(
                     client.getVideoFps()
                 )
 
+                /*
+                 * Une fois la caméra connectée, le compteur sert
+                 * uniquement à diagnostiquer les séries d'échecs.
+                 */
+                attempt = 0
+
+                /*
+                 * await() revient lorsque V380Stream s'arrête :
+                 * EOF, socket fermée, watchdog, erreur non récupérable,
+                 * ou arrêt volontaire.
+                 */
                 client.await()
 
                 if (
@@ -134,10 +170,31 @@ class CameraSupervisor(
                 ) {
 
                     log.warn(
-                        "[{}] flux caméra interrompu",
+                        "[{}] flux caméra interrompu - " +
+                                "reconnexion automatique",
                         config.id
                     )
                 }
+
+            } catch (e: InterruptedException) {
+
+                /*
+                 * close() interrompt volontairement le superviseur.
+                 */
+                Thread.currentThread()
+                    .interrupt()
+
+                if (
+                    running.get()
+                ) {
+
+                    log.warn(
+                        "[{}] superviseur interrompu",
+                        config.id
+                    )
+                }
+
+                break
 
             } catch (e: Exception) {
 
@@ -148,48 +205,115 @@ class CameraSupervisor(
                     log.warn(
                         "[{}] caméra indisponible : {}",
                         config.id,
-                        e.message
+                        e.message ?: e.javaClass.simpleName
+                    )
+
+                    log.debug(
+                        "[{}] détail de l'erreur de connexion",
+                        config.id,
+                        e
+                    )
+                }
+
+            } catch (t: Throwable) {
+
+                /*
+                 * On protège le thread contre les erreurs inattendues
+                 * non fatales, mais on ne masque jamais une erreur JVM
+                 * grave telle qu'un OutOfMemoryError.
+                 */
+                if (isFatal(t)) {
+                    throw t
+                }
+
+                if (
+                    running.get()
+                ) {
+
+                    log.error(
+                        "[{}] erreur inattendue dans le superviseur - " +
+                                "reconnexion automatique",
+                        config.id,
+                        t
                     )
                 }
 
             } finally {
 
-                try {
-                    client.close()
-                } catch (_: Exception) {
-                }
+                if (client != null) {
 
-                currentClient.compareAndSet(
-                    client,
-                    null
-                )
+                    try {
+                        client.close()
+                    } catch (e: Exception) {
+
+                        log.debug(
+                            "[{}] erreur ignorée pendant la fermeture du client : {}",
+                            config.id,
+                            e.message
+                        )
+                    }
+
+                    currentClient.compareAndSet(
+                        client,
+                        null
+                    )
+                }
             }
 
             if (
-                running.get()
+                running.get() &&
+                !waitBeforeReconnect()
             ) {
-
-                log.info(
-                    "[{}] reconnexion dans {} ms",
-                    config.id,
-                    config.reconnectDelayMs
-                )
-
-                try {
-
-                    Thread.sleep(
-                        config.reconnectDelayMs
-                    )
-
-                } catch (_: InterruptedException) {
-
-                    Thread.currentThread()
-                        .interrupt()
-
-                    break
-                }
+                break
             }
         }
+
+        log.debug(
+            "[{}] boucle du superviseur terminée",
+            config.id
+        )
+    }
+
+    private fun waitBeforeReconnect(): Boolean {
+
+        val delayMs =
+            config.reconnectDelayMs
+                .coerceAtLeast(0L)
+
+        if (delayMs == 0L) {
+            return running.get()
+        }
+
+        log.info(
+            "[{}] reconnexion dans {} ms",
+            config.id,
+            delayMs
+        )
+
+        return try {
+
+            Thread.sleep(
+                delayMs
+            )
+
+            running.get()
+
+        } catch (_: InterruptedException) {
+
+            Thread.currentThread()
+                .interrupt()
+
+            false
+        }
+    }
+
+    private fun isFatal(
+        throwable: Throwable
+    ): Boolean {
+
+        return throwable is VirtualMachineError ||
+                throwable is ThreadDeath ||
+                throwable is LinkageError
     }
 
     /*

@@ -17,6 +17,19 @@ class V380Stream(
 
     private val log = logger<V380Stream>()
 
+    companion object {
+
+        /**
+         * Si la socket reste ouverte mais qu'aucune frame média
+         * complète n'est reçue pendant ce délai, on considère le
+         * flux bloqué.
+         *
+         * La boucle se termine alors volontairement afin que le
+         * CameraSupervisor ferme les sockets et reconnecte la caméra.
+         */
+        const val VIDEO_STALL_TIMEOUT_MS = 20_000L
+    }
+
     private val parser =
         V380MediaParser()
 
@@ -43,6 +56,9 @@ class V380Stream(
     private val listeners =
         CopyOnWriteArrayList<FrameListener>()
 
+    private val audioListeners =
+        CopyOnWriteArrayList<AudioFrameListener>()
+
     /*
      * ============================================================
      * LISTENER
@@ -53,6 +69,13 @@ class V380Stream(
 
         fun onFrame(
             frame: V380MediaDecoder.DecodedVideoFrame
+        )
+    }
+
+    fun interface AudioFrameListener {
+
+        fun onAudioFrame(
+            frame: V380MediaDecoder.DecodedAudioFrame
         )
     }
 
@@ -116,6 +139,34 @@ class V380Stream(
         )
     }
 
+    fun addAudioListener(
+        listener: AudioFrameListener
+    ) {
+
+        audioListeners.addIfAbsent(
+            listener
+        )
+
+        log.debug(
+            "Listener audio ajouté - total={}",
+            audioListeners.size
+        )
+    }
+
+    fun removeAudioListener(
+        listener: AudioFrameListener
+    ) {
+
+        audioListeners.remove(
+            listener
+        )
+
+        log.debug(
+            "Listener audio supprimé - total={}",
+            audioListeners.size
+        )
+    }
+
     /*
      * ============================================================
      * START
@@ -170,10 +221,22 @@ class V380Stream(
         var totalFrames = 0L
         var totalKeyFrames = 0L
         var totalBytes = 0L
+        var totalAudioFrames = 0L
+        var totalAudioBytes = 0L
 
         var windowFrames = 0L
 
         var lastStatsTime =
+            System.nanoTime()
+
+        /*
+         * Horodatage de la dernière frame média complète reçue.
+         *
+         * Il est volontairement initialisé au démarrage afin qu'une
+         * connexion qui s'ouvre mais ne produit jamais de données
+         * soit également détectée par le watchdog.
+         */
+        var lastMediaFrameTime =
             System.nanoTime()
 
         try {
@@ -184,11 +247,71 @@ class V380Stream(
 
                     /*
                      * Lecture d'une frame V380 complète.
+                     *
+                     * V380MediaParser tente désormais de se
+                     * resynchroniser lui-même lorsqu'il rencontre
+                     * un header décalé / corrompu.
                      */
                     val mediaFrame =
                         parser.readNextFrame(
                             input
                         )
+
+                    lastMediaFrameTime =
+                        System.nanoTime()
+
+                    /*
+                     * Audio Xiaovv : type 0x18.
+                     *
+                     * Le décodeur retire le header interne V380,
+                     * déchiffre l'AES et retire l'en-tête ADTS.
+                     * Le listener reçoit donc directement un Access Unit AAC.
+                     */
+                    if (mediaFrame.isAudio) {
+
+                        try {
+
+                            val decodedAudio =
+                                decoder.decodeAudio(
+                                    mediaFrame
+                                )
+
+                            totalAudioFrames++
+                            totalAudioBytes +=
+                                decodedAudio.payload.size
+
+                            if (totalAudioFrames == 1L) {
+
+                                log.info(
+                                    "AUDIO détecté : AAC LC {} Hz, {} canal(aux), type=0x{}",
+                                    decodedAudio.sampleRate,
+                                    decodedAudio.channels,
+                                    decodedAudio.outerType
+                                        .toString(16)
+                                        .uppercase()
+                                        .padStart(2, '0')
+                                )
+                            }
+
+                            notifyAudioListeners(
+                                decodedAudio
+                            )
+
+                        } catch (e: Exception) {
+
+                            /*
+                             * Une frame audio corrompue ne doit jamais
+                             * faire tomber la vidéo ni provoquer une
+                             * reconnexion de la caméra.
+                             */
+                            log.warn(
+                                "Frame audio invalide ignorée : {}",
+                                e.message
+                            )
+                        }
+
+                        continue
+                    }
 
                     /*
                      * D'autres types de paquets peuvent
@@ -244,7 +367,7 @@ class V380Stream(
                     )
 
                     /*
-                     * Statistiques toutes les 5 secondes.
+                     * Statistiques toutes les 30 secondes.
                      */
                     val now =
                         System.nanoTime()
@@ -294,25 +417,60 @@ class V380Stream(
                             )
                         )
 
+                        if (totalAudioFrames > 0) {
+
+                            log.info(
+                                "AUDIO stats : {} frames AAC | {} Mo reçus",
+                                totalAudioFrames,
+                                formatDouble(
+                                    totalAudioBytes /
+                                            1024.0 /
+                                            1024.0
+                                )
+                            )
+                        }
+
                         windowFrames = 0
 
                         lastStatsTime =
                             now
                     }
 
-                } catch (_: SocketTimeoutException) {
+                } catch (e: SocketTimeoutException) {
 
                     /*
-                     * Un timeout n'est pas forcément une erreur.
+                     * Un timeout isolé n'est pas forcément une erreur.
                      *
-                     * Cela permet aussi de vérifier régulièrement
-                     * running lors d'un arrêt du programme.
+                     * En revanche, plusieurs timeouts successifs sans
+                     * aucune frame média valide indiquent une connexion
+                     * bloquée. Dans ce cas on remonte l'exception afin
+                     * que la boucle s'arrête et que CameraSupervisor
+                     * reconnecte complètement la caméra.
                      */
-
                     if (running.get()) {
 
+                        val stalledMs =
+                            (System.nanoTime() -
+                                    lastMediaFrameTime) /
+                                    1_000_000L
+
+                        if (
+                            stalledMs >=
+                            VIDEO_STALL_TIMEOUT_MS
+                        ) {
+
+                            throw SocketTimeoutException(
+                                "Aucune frame média valide depuis " +
+                                        "$stalledMs ms"
+                            ).also {
+                                it.initCause(e)
+                            }
+                        }
+
                         log.debug(
-                            "Timeout de lecture vidéo"
+                            "Timeout de lecture vidéo - " +
+                                    "dernière frame il y a {} ms",
+                            stalledMs
                         )
                     }
                 }
@@ -324,6 +482,16 @@ class V380Stream(
 
                 log.error(
                     "La caméra a fermé le flux vidéo",
+                    e
+                )
+            }
+
+        } catch (e: SocketTimeoutException) {
+
+            if (running.get()) {
+
+                log.error(
+                    "Watchdog vidéo déclenché : flux bloqué",
                     e
                 )
             }
@@ -381,6 +549,19 @@ class V380Stream(
                             1024.0
                 )
             )
+
+            if (totalAudioFrames > 0) {
+
+                log.info(
+                    "AUDIO total : {} frames AAC, {} Mo",
+                    totalAudioFrames,
+                    formatDouble(
+                        totalAudioBytes /
+                                1024.0 /
+                                1024.0
+                    )
+                )
+            }
         }
     }
 
@@ -410,6 +591,28 @@ class V380Stream(
                  */
                 log.error(
                     "Erreur dans un listener vidéo",
+                    e
+                )
+            }
+        }
+    }
+
+    private fun notifyAudioListeners(
+        frame: V380MediaDecoder.DecodedAudioFrame
+    ) {
+
+        for (listener in audioListeners) {
+
+            try {
+
+                listener.onAudioFrame(
+                    frame
+                )
+
+            } catch (e: Exception) {
+
+                log.error(
+                    "Erreur dans un listener audio",
                     e
                 )
             }

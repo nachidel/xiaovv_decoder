@@ -11,51 +11,45 @@ class V380MediaDecoder(
     private val log = logger<V380MediaDecoder>()
 
     companion object {
-
-        /**
-         * Header interne d'une frame média V380.
-         */
         const val INNER_HEADER_SIZE = 16
 
-        /**
-         * Le chiffrement vidéo V380 récent fonctionne
-         * par groupes de 80 octets :
-         *
-         * 64 octets chiffrés
-         * 16 octets laissés en clair
-         */
-        private const val CRYPTO_BLOCK_SIZE = 80
-        private const val ENCRYPTED_SIZE = 64
-
+        private const val VIDEO_CRYPTO_BLOCK_SIZE = 80
+        private const val VIDEO_ENCRYPTED_SIZE = 64
         private const val AES_BLOCK_SIZE = 16
+
+        private val AAC_SAMPLE_RATES = intArrayOf(
+            96_000,
+            88_200,
+            64_000,
+            48_000,
+            44_100,
+            32_000,
+            24_000,
+            22_050,
+            16_000,
+            12_000,
+            11_025,
+            8_000,
+            7_350
+        )
     }
 
-    /**
-     * Clé AES média dérivée du ticket de session.
-     */
     private val mediaKey: ByteArray =
         generateMediaKey(authTicket)
 
     init {
-
         log.info(
             "Décodeur média V380 initialisé"
         )
 
         /*
-         * Volontairement, on ne log pas la clé AES.
+         * La clé média n'est volontairement jamais écrite dans les logs.
          */
         log.debug(
             "Clé média générée depuis le ticket {}",
             authTicket
         )
     }
-
-    /*
-     * ============================================================
-     * FRAME DÉCODÉE
-     * ============================================================
-     */
 
     data class DecodedVideoFrame(
         val outerType: Int,
@@ -68,9 +62,47 @@ class V380MediaDecoder(
         val nalType: Int?
     )
 
+    data class DecodedAudioFrame(
+        val outerType: Int,
+        val frameId: Long,
+        val frameType: Int,
+        val frameRate: Int,
+        val timestamp: Long,
+        val audioObjectType: Int,
+        val sampleRate: Int,
+        val samplingFrequencyIndex: Int,
+        val channels: Int,
+        val samplesPerAccessUnit: Int,
+        /**
+         * Charge utile AAC brute, sans header ADTS.
+         */
+        val payload: ByteArray,
+        /**
+         * AudioSpecificConfig MPEG-4, utilisé dans le SDP RTSP.
+         */
+        val audioSpecificConfig: ByteArray
+    )
+
+    private data class InnerHeader(
+        val frameId: Long,
+        val frameType: Int,
+        val frameRate: Int,
+        val timestamp: Long
+    )
+
+    private data class AdtsHeader(
+        val audioObjectType: Int,
+        val samplingFrequencyIndex: Int,
+        val sampleRate: Int,
+        val channelConfiguration: Int,
+        val frameLength: Int,
+        val headerLength: Int,
+        val rawDataBlocks: Int
+    )
+
     /*
      * ============================================================
-     * DÉCODAGE FRAME
+     * VIDEO
      * ============================================================
      */
 
@@ -88,41 +120,10 @@ class V380MediaDecoder(
             "Frame vidéo trop courte : ${frame.data.size} octets"
         }
 
-        /*
-         * ========================================================
-         * HEADER INTERNE 16 OCTETS
-         * ========================================================
-         */
-
-        val frameId =
-            V380Protocol.readUInt32LE(
-                frame.data,
-                0
+        val header =
+            parseInnerHeader(
+                frame.data
             )
-
-        val frameType =
-            V380Protocol.readUInt16LE(
-                frame.data,
-                4
-            )
-
-        val frameRate =
-            V380Protocol.readUInt16LE(
-                frame.data,
-                6
-            )
-
-        val timestamp =
-            readUInt64LE(
-                frame.data,
-                8
-            )
-
-        /*
-         * ========================================================
-         * PAYLOAD VIDÉO
-         * ========================================================
-         */
 
         var payload =
             frame.data.copyOfRange(
@@ -131,37 +132,21 @@ class V380MediaDecoder(
             )
 
         log.debug(
-            "VIDEO interne : " +
-                    "id={}, type=0x{}, rate={}, timestamp={}, payload={} octets",
-            frameId,
-            frameType
+            "VIDEO interne : id={}, type=0x{}, rate={}, timestamp={}, payload={} octets",
+            header.frameId,
+            header.frameType
                 .toString(16)
                 .uppercase()
                 .padStart(2, '0'),
-            frameRate,
-            timestamp,
+            header.frameRate,
+            header.timestamp,
             payload.size
         )
 
-        /*
-         * Déchiffrement en place.
-         */
         decryptVideo(
             payload
         )
 
-        /*
-         * Le bitstream doit être en format Annex-B :
-         *
-         * 00 00 00 01
-         *
-         * ou :
-         *
-         * 00 00 01
-         *
-         * Certains firmwares laissent quelques octets
-         * avant le premier start code.
-         */
         val startCodeOffset =
             findAnnexBStartCode(
                 payload,
@@ -184,11 +169,6 @@ class V380MediaDecoder(
 
         } else if (startCodeOffset > 0) {
 
-            log.debug(
-                "Start code Annex-B trouvé à l'offset {}",
-                startCodeOffset
-            )
-
             payload =
                 payload.copyOfRange(
                     startCodeOffset,
@@ -196,9 +176,6 @@ class V380MediaDecoder(
                 )
         }
 
-        /*
-         * 0x28 est l'I-frame observée sur ces firmwares.
-         */
         val keyFrame =
             frame.type ==
                     V380MediaParser.TYPE_VIDEO_28
@@ -221,10 +198,10 @@ class V380MediaDecoder(
 
         return DecodedVideoFrame(
             outerType = frame.type,
-            frameId = frameId,
-            frameType = frameType,
-            frameRate = frameRate,
-            timestamp = timestamp,
+            frameId = header.frameId,
+            frameType = header.frameType,
+            frameRate = header.frameRate,
+            timestamp = header.timestamp,
             keyFrame = keyFrame,
             payload = payload,
             nalType = nalType
@@ -233,16 +210,301 @@ class V380MediaDecoder(
 
     /*
      * ============================================================
-     * DÉCHIFFREMENT VIDÉO
+     * AUDIO AAC
      * ============================================================
      *
-     * Firmware récent :
+     * Capture Xiaovv du 02/09/2026 :
      *
-     * [64 octets AES][16 octets clair]
-     * [64 octets AES][16 octets clair]
-     * ...
-     *
-     * AES-128 ECB / NoPadding
+     * - type média extérieur : 0x18
+     * - header interne : 16 octets, identique au principe vidéo
+     * - chiffrement : AES-128 ECB sur tous les blocs complets de 16 octets
+     * - résultat : AAC LC encapsulé ADTS
+     * - fréquence : 16 kHz
+     * - mono
+     */
+
+    fun decodeAudio(
+        frame: V380MediaParser.MediaFrame
+    ): DecodedAudioFrame {
+
+        require(frame.isAudio) {
+            "La frame reçue n'est pas une frame audio"
+        }
+
+        require(
+            frame.data.size > INNER_HEADER_SIZE
+        ) {
+            "Frame audio trop courte : ${frame.data.size} octets"
+        }
+
+        val header =
+            parseInnerHeader(
+                frame.data
+            )
+
+        val adtsFrame =
+            frame.data.copyOfRange(
+                INNER_HEADER_SIZE,
+                frame.data.size
+            )
+
+        decryptAudio(
+            adtsFrame
+        )
+
+        val adts =
+            parseAdtsHeader(
+                adtsFrame
+            )
+
+        require(
+            adts.frameLength <= adtsFrame.size
+        ) {
+            "Frame ADTS annoncée trop grande : " +
+                    "${adts.frameLength}/${adtsFrame.size} octets"
+        }
+
+        require(
+            adts.frameLength > adts.headerLength
+        ) {
+            "Frame AAC vide : ${adts.frameLength} octets"
+        }
+
+        val aacPayload =
+            adtsFrame.copyOfRange(
+                adts.headerLength,
+                adts.frameLength
+            )
+
+        val audioSpecificConfig =
+            buildAudioSpecificConfig(
+                audioObjectType =
+                    adts.audioObjectType,
+                samplingFrequencyIndex =
+                    adts.samplingFrequencyIndex,
+                channelConfiguration =
+                    adts.channelConfiguration
+            )
+
+        val samplesPerAccessUnit =
+            1024 *
+                    (adts.rawDataBlocks + 1)
+
+        log.trace(
+            "AUDIO décodé : type=0x{}, id={}, timestamp={}, AAC-LC {} Hz {} canal(aux), AU={} octets",
+            frame.type
+                .toString(16)
+                .uppercase()
+                .padStart(2, '0'),
+            header.frameId,
+            header.timestamp,
+            adts.sampleRate,
+            adts.channelConfiguration,
+            aacPayload.size
+        )
+
+        return DecodedAudioFrame(
+            outerType = frame.type,
+            frameId = header.frameId,
+            frameType = header.frameType,
+            frameRate = header.frameRate,
+            timestamp = header.timestamp,
+            audioObjectType = adts.audioObjectType,
+            sampleRate = adts.sampleRate,
+            samplingFrequencyIndex = adts.samplingFrequencyIndex,
+            channels = adts.channelConfiguration,
+            samplesPerAccessUnit = samplesPerAccessUnit,
+            payload = aacPayload,
+            audioSpecificConfig = audioSpecificConfig
+        )
+    }
+
+    private fun parseInnerHeader(
+        data: ByteArray
+    ): InnerHeader {
+
+        require(
+            data.size >= INNER_HEADER_SIZE
+        ) {
+            "Header média interne incomplet"
+        }
+
+        return InnerHeader(
+            frameId =
+                V380Protocol.readUInt32LE(
+                    data,
+                    0
+                ),
+            frameType =
+                V380Protocol.readUInt16LE(
+                    data,
+                    4
+                ),
+            frameRate =
+                V380Protocol.readUInt16LE(
+                    data,
+                    6
+                ),
+            timestamp =
+                readUInt64LE(
+                    data,
+                    8
+                )
+        )
+    }
+
+    private fun parseAdtsHeader(
+        data: ByteArray
+    ): AdtsHeader {
+
+        require(
+            data.size >= 7
+        ) {
+            "Frame ADTS trop courte : ${data.size} octets"
+        }
+
+        val b0 =
+            data[0].toInt() and 0xFF
+
+        val b1 =
+            data[1].toInt() and 0xFF
+
+        require(
+            b0 == 0xFF &&
+                    (b1 and 0xF0) == 0xF0
+        ) {
+            "Synchronisation ADTS absente : ${V380Protocol.hex(data, 16)}"
+        }
+
+        val layer =
+            (b1 ushr 1) and 0x03
+
+        require(layer == 0) {
+            "Layer ADTS invalide : $layer"
+        }
+
+        val protectionAbsent =
+            b1 and 0x01
+
+        val b2 =
+            data[2].toInt() and 0xFF
+
+        val b3 =
+            data[3].toInt() and 0xFF
+
+        val b4 =
+            data[4].toInt() and 0xFF
+
+        val b5 =
+            data[5].toInt() and 0xFF
+
+        val b6 =
+            data[6].toInt() and 0xFF
+
+        val profile =
+            (b2 ushr 6) and 0x03
+
+        val audioObjectType =
+            profile + 1
+
+        val samplingFrequencyIndex =
+            (b2 ushr 2) and 0x0F
+
+        require(
+            samplingFrequencyIndex in AAC_SAMPLE_RATES.indices
+        ) {
+            "Fréquence AAC ADTS non supportée : index=$samplingFrequencyIndex"
+        }
+
+        val sampleRate =
+            AAC_SAMPLE_RATES[
+                samplingFrequencyIndex
+            ]
+
+        val channelConfiguration =
+            ((b2 and 0x01) shl 2) or
+                    ((b3 ushr 6) and 0x03)
+
+        require(
+            channelConfiguration in 1..7
+        ) {
+            "Configuration canaux AAC non supportée : $channelConfiguration"
+        }
+
+        val frameLength =
+            ((b3 and 0x03) shl 11) or
+                    (b4 shl 3) or
+                    ((b5 ushr 5) and 0x07)
+
+        val headerLength =
+            if (protectionAbsent == 1) {
+                7
+            } else {
+                9
+            }
+
+        require(
+            data.size >= headerLength
+        ) {
+            "Header ADTS CRC incomplet"
+        }
+
+        val rawDataBlocks =
+            b6 and 0x03
+
+        return AdtsHeader(
+            audioObjectType = audioObjectType,
+            samplingFrequencyIndex = samplingFrequencyIndex,
+            sampleRate = sampleRate,
+            channelConfiguration = channelConfiguration,
+            frameLength = frameLength,
+            headerLength = headerLength,
+            rawDataBlocks = rawDataBlocks
+        )
+    }
+
+    private fun buildAudioSpecificConfig(
+        audioObjectType: Int,
+        samplingFrequencyIndex: Int,
+        channelConfiguration: Int
+    ): ByteArray {
+
+        require(
+            audioObjectType in 1..31
+        ) {
+            "Audio Object Type AAC invalide : $audioObjectType"
+        }
+
+        require(
+            samplingFrequencyIndex in 0..15
+        ) {
+            "Index de fréquence AAC invalide : $samplingFrequencyIndex"
+        }
+
+        require(
+            channelConfiguration in 0..15
+        ) {
+            "Configuration canaux AAC invalide : $channelConfiguration"
+        }
+
+        return byteArrayOf(
+            (
+                    (audioObjectType shl 3) or
+                            (samplingFrequencyIndex ushr 1)
+                    )
+                .toByte(),
+            (
+                    ((samplingFrequencyIndex and 0x01) shl 7) or
+                            (channelConfiguration shl 3)
+                    )
+                .toByte()
+        )
+    }
+
+    /*
+     * ============================================================
+     * DÉCHIFFREMENT
+     * ============================================================
      */
 
     private fun decryptVideo(
@@ -254,29 +516,15 @@ class V380MediaDecoder(
         }
 
         val cipher =
-            Cipher.getInstance(
-                "AES/ECB/NoPadding"
-            )
-
-        cipher.init(
-            Cipher.DECRYPT_MODE,
-            SecretKeySpec(
-                mediaKey,
-                "AES"
-            )
-        )
+            createMediaCipher()
 
         var offset = 0
 
         while (
-            offset + ENCRYPTED_SIZE <=
+            offset + VIDEO_ENCRYPTED_SIZE <=
             data.size
         ) {
 
-            /*
-             * 64 octets =
-             * 4 blocs AES de 16 octets.
-             */
             for (block in 0 until 4) {
 
                 val blockOffset =
@@ -296,29 +544,62 @@ class V380MediaDecoder(
                 )
             }
 
-            /*
-             * Les 16 octets suivants restent intacts.
-             */
             offset +=
-                CRYPTO_BLOCK_SIZE
+                VIDEO_CRYPTO_BLOCK_SIZE
         }
     }
 
-    /*
-     * ============================================================
-     * CLÉ MÉDIA
-     * ============================================================
-     *
-     * Construction observée dans l'implémentation récente :
-     *
-     * offset 0  : ticket uint32 LE
-     *
-     * offset 4  :
-     * 0x618123462c14795c uint64 LE
-     *
-     * offset 12 :
-     * 0x82800df0 uint32 LE
-     */
+    private fun decryptAudio(
+        data: ByteArray
+    ) {
+
+        val alignedSize =
+            (data.size / AES_BLOCK_SIZE) *
+                    AES_BLOCK_SIZE
+
+        if (alignedSize == 0) {
+            return
+        }
+
+        val cipher =
+            createMediaCipher()
+
+        var offset = 0
+
+        while (offset < alignedSize) {
+
+            val decrypted =
+                cipher.doFinal(
+                    data,
+                    offset,
+                    AES_BLOCK_SIZE
+                )
+
+            decrypted.copyInto(
+                destination = data,
+                destinationOffset = offset
+            )
+
+            offset +=
+                AES_BLOCK_SIZE
+        }
+    }
+
+    private fun createMediaCipher(): Cipher {
+
+        return Cipher.getInstance(
+            "AES/ECB/NoPadding"
+        ).apply {
+
+            init(
+                Cipher.DECRYPT_MODE,
+                SecretKeySpec(
+                    mediaKey,
+                    "AES"
+                )
+            )
+        }
+    }
 
     private fun generateMediaKey(
         ticket: Int
@@ -350,7 +631,7 @@ class V380MediaDecoder(
 
     /*
      * ============================================================
-     * ANNEX-B
+     * H.265
      * ============================================================
      */
 
@@ -366,27 +647,17 @@ class V380MediaDecoder(
         val end =
             minOf(
                 maxSearch,
-                data.size - 3
+                data.size - 2
             )
 
         for (i in 0 until end) {
 
-            /*
-             * 00 00 01
-             */
             if (
                 data[i] == 0.toByte() &&
                 data[i + 1] == 0.toByte() &&
                 data[i + 2] == 1.toByte()
             ) {
 
-                /*
-                 * Si on a :
-                 *
-                 * 00 00 00 01
-                 *
-                 * on retourne le zéro précédent.
-                 */
                 if (
                     i > 0 &&
                     data[i - 1] == 0.toByte()
@@ -401,66 +672,37 @@ class V380MediaDecoder(
         return -1
     }
 
-    /*
-     * ============================================================
-     * H.265 NAL TYPE
-     * ============================================================
-     */
-
     private fun detectH265NalType(
         payload: ByteArray
     ): Int? {
 
-        if (payload.size < 5) {
+        if (payload.size < 4) {
             return null
         }
 
-        var offset = 0
+        val offset =
+            when {
 
-        /*
-         * 00 00 00 01
-         */
-        if (
-            payload.size >= 5 &&
-            payload[0] == 0.toByte() &&
-            payload[1] == 0.toByte() &&
-            payload[2] == 0.toByte() &&
-            payload[3] == 1.toByte()
-        ) {
+                payload.size >= 5 &&
+                        payload[0] == 0.toByte() &&
+                        payload[1] == 0.toByte() &&
+                        payload[2] == 0.toByte() &&
+                        payload[3] == 1.toByte() ->
+                    4
 
-            offset = 4
+                payload[0] == 0.toByte() &&
+                        payload[1] == 0.toByte() &&
+                        payload[2] == 1.toByte() ->
+                    3
 
-            /*
-             * 00 00 01
-             */
-        } else if (
-            payload[0] == 0.toByte() &&
-            payload[1] == 0.toByte() &&
-            payload[2] == 1.toByte()
-        ) {
-
-            offset = 3
-
-        } else {
-
-            return null
-        }
+                else ->
+                    return null
+            }
 
         if (offset >= payload.size) {
             return null
         }
 
-        /*
-         * HEVC :
-         *
-         * forbidden_zero_bit : 1
-         * nal_unit_type       : 6
-         * nuh_layer_id...
-         *
-         * nal_unit_type =
-         *
-         * (byte >> 1) & 0x3F
-         */
         return (
                 payload[offset].toInt() ushr 1
                 ) and 0x3F

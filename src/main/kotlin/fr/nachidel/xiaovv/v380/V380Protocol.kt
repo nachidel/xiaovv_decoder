@@ -53,15 +53,10 @@ object V380Protocol {
     const val DEFAULT_REQUEST_FPS = 20
 
     /**
-     * Offset 22 du paquet 301.
+     * Offset 22 du paquet VIDEO_LOGIN 301.
      *
-     * Notre capture contient :
-     *
-     * 00 10 00 00
-     *
-     * soit 0x1000.
-     *
-     * La signification exacte n'est pas encore certaine.
+     * La capture de l'application officielle montre 0x1000.
+     * L'activation audio est envoyée séparément avec la commande 8449.
      */
     private const val STREAM_FLAG = 0x1000
 
@@ -94,9 +89,18 @@ object V380Protocol {
     private const val START_VIDEO_VALUE = 0x3001
 
     /**
-     * Valeur observée dans la commande 8449.
+     * Valeur d'initialisation du flux observée dans la commande 8449.
      */
     private const val STREAM_INIT_FLAG = 0x1000
+
+    /**
+     * Commande 8449 envoyée par l'application lors du clic sur le son.
+     *
+     * 0x1000 = audio désactivé
+     * 0x1001 = audio activé
+     */
+    private const val AUDIO_OFF_FLAG = 0x1000
+    private const val AUDIO_ON_FLAG = 0x1001
 
 
     /*
@@ -253,7 +257,7 @@ object V380Protocol {
      * VIDEO LOGIN 301
      * ============================================================
      *
-     * Paquet observé :
+     * Paquet :
      *
      * OFFSET  TYPE     VALEUR
      *
@@ -301,87 +305,56 @@ object V380Protocol {
                 VIDEO_LOGIN_REQUEST_SIZE
             )
 
-        /*
-         * Commande
-         */
         writeInt32LE(
             packet,
             0,
             CMD_VIDEO_LOGIN
         )
 
-        /*
-         * Octet supplémentaire observé dans
-         * le paquet 301 de l'application officielle.
-         */
         packet[32] = 0x01
 
-        /*
-         * Device ID
-         */
         writeUInt32LE(
             packet,
             4,
             deviceId
         )
 
-        /*
-         * unknown1 = 0
-         */
         writeInt32LE(
             packet,
             8,
             0
         )
 
-        /*
-         * FPS
-         */
         writeUInt16LE(
             packet,
             12,
             requestFps
         )
 
-        /*
-         * Ticket obtenu pendant l'authentification.
-         */
         writeInt32LE(
             packet,
             14,
             authTicket
         )
 
-        /*
-         * unknown3 = 0
-         */
         writeInt32LE(
             packet,
             18,
             0
         )
 
-        /*
-         * Valeur exacte observée dans notre PCAP.
-         */
         writeInt32LE(
             packet,
             22,
             STREAM_FLAG
         )
 
-        /*
-         * Résolution.
-         */
         writeInt32LE(
             packet,
             26,
             resolution
         )
 
-        /*
-         * Valeur exacte observée dans notre PCAP.
-         */
         writeInt32LE(
             packet,
             30,
@@ -405,23 +378,6 @@ object V380Protocol {
      * ============================================================
      * VIDEO LOGIN RESPONSE 401
      * ============================================================
-     *
-     * Notre capture :
-     *
-     * 91 01 00 00
-     * E9 03 00 00
-     * 14 00
-     * 80 02 00 00
-     * 68 01 00 00
-     * ...
-     *
-     * donne :
-     *
-     * command = 401
-     * result  = 1001
-     * fps     = 20
-     * width   = 640
-     * height  = 360
      */
 
     data class VideoLoginResponse(
@@ -539,12 +495,6 @@ object V380Protocol {
             CMD_START_VIDEO
         )
 
-        /*
-         * Valeur EXACTE observée dans notre capture.
-         *
-         * Je ne lui donne volontairement pas encore
-         * de signification fonctionnelle.
-         */
         writeInt32LE(
             packet,
             4,
@@ -566,16 +516,38 @@ object V380Protocol {
      * ============================================================
      * STREAM INIT 8449
      * ============================================================
-     *
-     * Capture :
-     *
-     * 01 21 00 00
-     * 00 00 00 00
-     * 00 10 00 00
-     * 00 00 00 00
      */
 
     fun buildStreamInitRequest(): ByteArray {
+        return buildStreamSelectionRequest(
+            STREAM_INIT_FLAG
+        )
+    }
+
+    /**
+     * Active ou coupe l'audio sur la session média déjà ouverte.
+     *
+     * Capture officielle :
+     *
+     * AUDIO ON  : 01 21 00 00 00 00 00 00 01 10 00 00 00 00 00 00
+     * AUDIO OFF : 01 21 00 00 00 00 00 00 00 10 00 00 00 00 00 00
+     */
+    fun buildAudioControlRequest(
+        enabled: Boolean
+    ): ByteArray {
+
+        return buildStreamSelectionRequest(
+            if (enabled) {
+                AUDIO_ON_FLAG
+            } else {
+                AUDIO_OFF_FLAG
+            }
+        )
+    }
+
+    private fun buildStreamSelectionRequest(
+        flag: Int
+    ): ByteArray {
 
         val packet =
             ByteArray(
@@ -597,7 +569,7 @@ object V380Protocol {
         writeInt32LE(
             packet,
             8,
-            STREAM_INIT_FLAG
+            flag
         )
 
         writeInt32LE(

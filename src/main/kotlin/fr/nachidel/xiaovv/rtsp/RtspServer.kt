@@ -1,5 +1,7 @@
 package fr.nachidel.xiaovv.rtsp
 
+import fr.nachidel.xiaovv.h265.H265AnnexB
+import fr.nachidel.xiaovv.h265.H265RtpPacketizer
 import fr.nachidel.xiaovv.logging.logger
 import fr.nachidel.xiaovv.v380.V380MediaDecoder
 import java.io.BufferedInputStream
@@ -19,9 +21,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import fr.nachidel.xiaovv.h265.H265AnnexB
-import fr.nachidel.xiaovv.h265.H265RtpPacketizer
-import kotlin.collections.iterator
 
 class RtspServer(
     private val bindAddress: String = "0.0.0.0",
@@ -42,30 +41,11 @@ class RtspServer(
             Thread? =
         null
 
-    /*
-     * ============================================================
-     * STREAMS
-     * ============================================================
-     *
-     * /entree
-     * /garage
-     * /jardin
-     * ...
-     *
-     * Aucune limite.
-     */
-
     private val streams =
         ConcurrentHashMap<String, RtspStream>()
 
     private val clients =
         CopyOnWriteArrayList<ClientSession>()
-
-    /*
-     * ============================================================
-     * STREAM MANAGEMENT
-     * ============================================================
-     */
 
     fun createStream(
         name: String,
@@ -94,9 +74,7 @@ class RtspServer(
                 stream
             )
 
-        check(
-            existing == null
-        ) {
+        check(existing == null) {
             "Le stream RTSP '$name' existe déjà"
         }
 
@@ -111,7 +89,6 @@ class RtspServer(
     fun getStream(
         name: String
     ): RtspStream? {
-
         return streams[name]
     }
 
@@ -132,12 +109,6 @@ class RtspServer(
             name
         )
     }
-
-    /*
-     * ============================================================
-     * START
-     * ============================================================
-     */
 
     fun start() {
 
@@ -212,17 +183,9 @@ class RtspServer(
         }
     }
 
-    /*
-     * ============================================================
-     * ACCEPT
-     * ============================================================
-     */
-
     private fun acceptLoop() {
 
-        while (
-            running.get()
-        ) {
+        while (running.get()) {
 
             try {
 
@@ -279,12 +242,6 @@ class RtspServer(
         }
     }
 
-    /*
-     * ============================================================
-     * REQUEST
-     * ============================================================
-     */
-
     private data class RtspRequest(
         val method: String,
         val uri: String,
@@ -292,16 +249,17 @@ class RtspServer(
         val headers: Map<String, String>
     )
 
-    private data class QueuedAccessUnit(
-        val frame: V380MediaDecoder.DecodedVideoFrame,
-        val nals: List<H265AnnexB.NalUnit>
-    )
+    private sealed interface QueuedMedia {
 
-    /*
-     * ============================================================
-     * CLIENT
-     * ============================================================
-     */
+        data class Video(
+            val frame: V380MediaDecoder.DecodedVideoFrame,
+            val nals: List<H265AnnexB.NalUnit>
+        ) : QueuedMedia
+
+        data class Audio(
+            val frame: V380MediaDecoder.DecodedAudioFrame
+        ) : QueuedMedia
+    }
 
     private inner class ClientSession(
         private val socket: Socket
@@ -332,7 +290,11 @@ class RtspServer(
             null
 
         @Volatile
-        private var setupDone =
+        private var videoSetupDone =
+            false
+
+        @Volatile
+        private var audioSetupDone =
             false
 
         @Volatile
@@ -344,21 +306,34 @@ class RtspServer(
             true
 
         @Volatile
-        private var rtpChannel =
+        private var videoRtpChannel =
             0
 
         @Volatile
-        private var rtcpChannel =
+        private var videoRtcpChannel =
             1
 
         @Volatile
-        private var packetizer:
+        private var audioRtpChannel =
+            2
+
+        @Volatile
+        private var audioRtcpChannel =
+            3
+
+        @Volatile
+        private var videoPacketizer:
                 H265RtpPacketizer? =
             null
 
-        private val rtpQueue =
-            ArrayBlockingQueue<QueuedAccessUnit>(
-                50
+        @Volatile
+        private var audioPacketizer:
+                AacRtpPacketizer? =
+            null
+
+        private val mediaQueue =
+            ArrayBlockingQueue<QueuedMedia>(
+                200
             )
 
         private var controlThread:
@@ -369,22 +344,25 @@ class RtspServer(
                 Thread? =
             null
 
-        private val streamListener =
+        private val videoListener =
             RtspStream.AccessUnitListener {
                     frame,
                     nals ->
 
-                enqueueAccessUnit(
+                enqueueVideo(
                     frame,
                     nals
                 )
             }
 
-        /*
-         * ========================================================
-         * START
-         * ========================================================
-         */
+        private val audioListener =
+            RtspStream.AudioAccessUnitListener {
+                    frame ->
+
+                enqueueAudio(
+                    frame
+                )
+            }
 
         fun start() {
 
@@ -416,12 +394,6 @@ class RtspServer(
                     start()
                 }
         }
-
-        /*
-         * ========================================================
-         * CONTROL LOOP
-         * ========================================================
-         */
 
         private fun clientLoop() {
 
@@ -471,12 +443,6 @@ class RtspServer(
                 close()
             }
         }
-
-        /*
-         * ========================================================
-         * HANDLER
-         * ========================================================
-         */
 
         private fun handleRequest(
             request: RtspRequest
@@ -548,7 +514,6 @@ class RtspServer(
                         mapOf(
                             "Content-Type" to
                                     "application/sdp",
-
                             "Content-Base" to
                                     base
                         ),
@@ -645,12 +610,6 @@ class RtspServer(
             }
         }
 
-        /*
-         * ========================================================
-         * SETUP
-         * ========================================================
-         */
-
         private fun handleSetup(
             request: RtspRequest,
             cseq: String
@@ -707,6 +666,24 @@ class RtspServer(
                 return
             }
 
+            val trackId =
+                resolveTrackId(
+                    request.uri
+                )
+
+            val audioTrack =
+                trackId == 1
+
+            var rtpChannel =
+                if (audioTrack) {
+                    2
+                } else {
+                    0
+                }
+
+            var rtcpChannel =
+                rtpChannel + 1
+
             val match =
                 Regex(
                     """interleaved=(\d+)-(\d+)""",
@@ -727,22 +704,58 @@ class RtspServer(
                         .toInt()
             }
 
-            val newPacketizer =
-                H265RtpPacketizer(
-                    fps = stream.fps,
-                    payloadType = 96,
-                    mtu = 1200
-                )
-
-            packetizer =
-                newPacketizer
-
-            setupDone =
-                true
-
             val ssrc =
-                newPacketizer
-                    .getSsrc()
+                if (audioTrack) {
+
+                    audioRtpChannel =
+                        rtpChannel
+
+                    audioRtcpChannel =
+                        rtcpChannel
+
+                    val packetizer =
+                        AacRtpPacketizer(
+                            sampleRate = 16_000,
+                            payloadType =
+                                RtspStream.AUDIO_PAYLOAD_TYPE,
+                            mtu = 1200
+                        )
+
+                    audioPacketizer =
+                        packetizer
+
+                    audioSetupDone =
+                        true
+
+                    packetizer.getSsrc()
+
+                } else {
+
+                    videoRtpChannel =
+                        rtpChannel
+
+                    videoRtcpChannel =
+                        rtcpChannel
+
+                    val packetizer =
+                        H265RtpPacketizer(
+                            fps = stream.fps,
+                            payloadType =
+                                RtspStream.VIDEO_PAYLOAD_TYPE,
+                            mtu = 1200
+                        )
+
+                    videoPacketizer =
+                        packetizer
+
+                    videoSetupDone =
+                        true
+
+                    packetizer.getSsrc()
+                }
+
+            val ssrcText =
+                ssrc
                     .toString(16)
                     .uppercase()
                     .padStart(
@@ -759,25 +772,21 @@ class RtspServer(
                             "RTP/AVP/TCP;" +
                             "unicast;" +
                             "interleaved=$rtpChannel-$rtcpChannel;" +
-                            "ssrc=$ssrc",
-
+                            "ssrc=$ssrcText",
                     "Session" to
                             "$sessionId;timeout=60"
                 )
             )
 
             log.info(
-                "RTSP SETUP /{} : {}",
+                "RTSP SETUP /{} trackID={} : {} (RTP {} / RTCP {})",
                 stream.name,
-                socket.inetAddress.hostAddress
+                trackId,
+                socket.inetAddress.hostAddress,
+                rtpChannel,
+                rtcpChannel
             )
         }
-
-        /*
-         * ========================================================
-         * PLAY
-         * ========================================================
-         */
 
         private fun handlePlay(
             cseq: String
@@ -787,9 +796,8 @@ class RtspServer(
                 selectedStream
 
             if (
-                !setupDone ||
                 stream == null ||
-                packetizer == null
+                (!videoSetupDone && !audioSetupDone)
             ) {
 
                 sendResponse(
@@ -802,7 +810,7 @@ class RtspServer(
             }
 
             /*
-             * Réponse RTSP AVANT l'arrivée des paquets RTP.
+             * Répond toujours au PLAY avant d'émettre le premier RTP.
              */
             sendResponse(
                 cseq,
@@ -811,36 +819,39 @@ class RtspServer(
                 mapOf(
                     "Session" to
                             sessionId,
-
                     "Range" to
                             "npt=0.000-"
                 )
             )
 
-            rtpQueue.clear()
+            mediaQueue.clear()
 
             waitingForKeyFrame =
-                true
+                videoSetupDone
 
             playing =
                 true
 
-            stream.addListener(
-                streamListener
-            )
+            if (videoSetupDone) {
+                stream.addListener(
+                    videoListener
+                )
+            }
+
+            if (audioSetupDone) {
+                stream.addAudioListener(
+                    audioListener
+                )
+            }
 
             log.info(
-                "RTSP PLAY /{} : {}",
+                "RTSP PLAY /{} : {} (vidéo={}, audio={})",
                 stream.name,
-                socket.inetAddress.hostAddress
+                socket.inetAddress.hostAddress,
+                videoSetupDone,
+                audioSetupDone
             )
         }
-
-        /*
-         * ========================================================
-         * BIND STREAM
-         * ========================================================
-         */
 
         private fun bindStream(
             stream: RtspStream
@@ -849,36 +860,41 @@ class RtspServer(
             val previous =
                 selectedStream
 
-            if (
-                previous === stream
-            ) {
+            if (previous === stream) {
                 return
             }
 
-            previous?.removeListener(
-                streamListener
-            )
-
-            playing =
-                false
-
-            setupDone =
-                false
-
-            rtpQueue.clear()
-
-            packetizer =
-                null
+            pauseStream()
 
             selectedStream =
                 stream
-        }
 
-        /*
-         * ========================================================
-         * PAUSE
-         * ========================================================
-         */
+            videoSetupDone =
+                false
+
+            audioSetupDone =
+                false
+
+            videoPacketizer =
+                null
+
+            audioPacketizer =
+                null
+
+            videoRtpChannel =
+                0
+
+            videoRtcpChannel =
+                1
+
+            audioRtpChannel =
+                2
+
+            audioRtcpChannel =
+                3
+
+            mediaQueue.clear()
+        }
 
         private fun pauseStream() {
 
@@ -888,28 +904,28 @@ class RtspServer(
             waitingForKeyFrame =
                 true
 
-            rtpQueue.clear()
+            mediaQueue.clear()
 
             selectedStream
                 ?.removeListener(
-                    streamListener
+                    videoListener
+                )
+
+            selectedStream
+                ?.removeAudioListener(
+                    audioListener
                 )
         }
 
-        /*
-         * ========================================================
-         * ACCESS UNIT
-         * ========================================================
-         */
-
-        private fun enqueueAccessUnit(
+        private fun enqueueVideo(
             frame: V380MediaDecoder.DecodedVideoFrame,
             nals: List<H265AnnexB.NalUnit>
         ) {
 
             if (
                 !active.get() ||
-                !playing
+                !playing ||
+                !videoSetupDone
             ) {
                 return
             }
@@ -920,9 +936,7 @@ class RtspServer(
                             it.isKeyFrameNal
                         }
 
-            if (
-                waitingForKeyFrame
-            ) {
+            if (waitingForKeyFrame) {
 
                 if (!keyFrame) {
                     return
@@ -937,49 +951,87 @@ class RtspServer(
                 )
             }
 
-            val accessUnit =
-                QueuedAccessUnit(
-                    frame,
-                    nals
+            val item =
+                QueuedMedia.Video(
+                    frame = frame,
+                    nals = nals
                 )
 
-            if (
-                !rtpQueue.offer(
-                    accessUnit
+            if (!mediaQueue.offer(item)) {
+
+                handleSlowClient(
+                    keyFrameItem =
+                        if (keyFrame) {
+                            item
+                        } else {
+                            null
+                        }
                 )
-            ) {
-
-                /*
-                 * Client trop lent :
-                 * on abandonne son retard.
-                 */
-                rtpQueue.clear()
-
-                waitingForKeyFrame =
-                    true
-
-                log.warn(
-                    "RTSP /{} client trop lent : resynchronisation",
-                    selectedStream?.name
-                )
-
-                if (keyFrame) {
-
-                    waitingForKeyFrame =
-                        false
-
-                    rtpQueue.offer(
-                        accessUnit
-                    )
-                }
             }
         }
 
-        /*
-         * ========================================================
-         * RTP SENDER
-         * ========================================================
-         */
+        private fun enqueueAudio(
+            frame: V380MediaDecoder.DecodedAudioFrame
+        ) {
+
+            if (
+                !active.get() ||
+                !playing ||
+                !audioSetupDone
+            ) {
+                return
+            }
+
+            /*
+             * Quand le client reçoit aussi la vidéo, on démarre
+             * l'audio avec la première keyframe vidéo pour éviter
+             * de commencer au milieu d'un GOP.
+             */
+            if (
+                videoSetupDone &&
+                waitingForKeyFrame
+            ) {
+                return
+            }
+
+            if (
+                !mediaQueue.offer(
+                    QueuedMedia.Audio(
+                        frame
+                    )
+                )
+            ) {
+
+                handleSlowClient(
+                    keyFrameItem = null
+                )
+            }
+        }
+
+        private fun handleSlowClient(
+            keyFrameItem: QueuedMedia.Video?
+        ) {
+
+            mediaQueue.clear()
+
+            waitingForKeyFrame =
+                videoSetupDone
+
+            log.warn(
+                "RTSP /{} client trop lent : resynchronisation",
+                selectedStream?.name
+            )
+
+            if (keyFrameItem != null) {
+
+                waitingForKeyFrame =
+                    false
+
+                mediaQueue.offer(
+                    keyFrameItem
+                )
+            }
+        }
 
         private fun senderLoop() {
 
@@ -990,8 +1042,8 @@ class RtspServer(
                     running.get()
                 ) {
 
-                    val accessUnit =
-                        rtpQueue.poll(
+                    val media =
+                        mediaQueue.poll(
                             1,
                             TimeUnit.SECONDS
                         )
@@ -1001,31 +1053,57 @@ class RtspServer(
                         continue
                     }
 
-                    val p =
-                        packetizer
-                            ?: continue
+                    when (media) {
 
-                    val packets =
-                        p.packetizeAccessUnit(
-                            nals =
-                                accessUnit.nals,
+                        is QueuedMedia.Video -> {
 
-                            cameraTimestampMs =
-                                accessUnit.frame.timestamp
-                        )
+                            val packetizer =
+                                videoPacketizer
+                                    ?: continue
 
-                    for (packet in packets) {
+                            val packets =
+                                packetizer.packetizeAccessUnit(
+                                    nals = media.nals,
+                                    cameraTimestampMs =
+                                        media.frame.timestamp
+                                )
 
-                        if (
-                            !active.get() ||
-                            !playing
-                        ) {
-                            break
+                            for (packet in packets) {
+
+                                if (
+                                    !active.get() ||
+                                    !playing
+                                ) {
+                                    break
+                                }
+
+                                sendInterleavedRtp(
+                                    channel =
+                                        videoRtpChannel,
+                                    rtp =
+                                        packet.toByteArray()
+                                )
+                            }
                         }
 
-                        sendInterleavedRtp(
-                            packet
-                        )
+                        is QueuedMedia.Audio -> {
+
+                            val packetizer =
+                                audioPacketizer
+                                    ?: continue
+
+                            val packet =
+                                packetizer.packetize(
+                                    media.frame
+                                )
+
+                            sendInterleavedRtp(
+                                channel =
+                                    audioRtpChannel,
+                                rtp =
+                                    packet.toByteArray()
+                            )
+                        }
                     }
                 }
 
@@ -1047,37 +1125,42 @@ class RtspServer(
                         e.message
                     )
                 }
+
+                close()
             }
         }
 
-        /*
-         * ========================================================
-         * RTP INTERLEAVED
-         * ========================================================
-         */
-
         private fun sendInterleavedRtp(
-            packet: H265RtpPacketizer.RtpPacket
+            channel: Int,
+            rtp: ByteArray
         ) {
 
-            val data =
-                packet.toByteArray()
+            require(
+                channel in 0..255
+            ) {
+                "Canal RTP interleaved invalide : $channel"
+            }
+
+            require(
+                rtp.size <= 0xFFFF
+            ) {
+                "Paquet RTP trop grand : ${rtp.size} octets"
+            }
 
             val header =
                 byteArrayOf(
                     0x24,
-
-                    rtpChannel.toByte(),
-
+                    channel.toByte(),
                     (
-                            (data.size ushr 8)
-                                    and 0xFF
-                            ).toByte(),
-
+                            (rtp.size ushr 8) and
+                                    0xFF
+                            )
+                        .toByte(),
                     (
-                            data.size
-                                    and 0xFF
-                            ).toByte()
+                            rtp.size and
+                                    0xFF
+                            )
+                        .toByte()
                 )
 
             synchronized(outputLock) {
@@ -1087,26 +1170,18 @@ class RtspServer(
                 )
 
                 output.write(
-                    data
+                    rtp
                 )
 
                 output.flush()
             }
         }
 
-        /*
-         * ========================================================
-         * RESOLVE STREAM
-         * ========================================================
-         */
-
         private fun resolveStream(
             uri: String
         ): RtspStream? {
 
-            if (
-                uri == "*"
-            ) {
+            if (uri == "*") {
                 return null
             }
 
@@ -1117,8 +1192,7 @@ class RtspServer(
 
                 } catch (_: Exception) {
 
-                    uri
-                        .substringBefore('?')
+                    uri.substringBefore('?')
                 }
 
             val segments =
@@ -1133,24 +1207,40 @@ class RtspServer(
                 return null
             }
 
-            /*
-             * /camera1
-             *
-             * ou :
-             *
-             * /camera1/trackID=0
-             */
-
             return streams[
                 segments.first()
             ]
         }
 
-        /*
-         * ========================================================
-         * RESPONSE
-         * ========================================================
-         */
+        private fun resolveTrackId(
+            uri: String
+        ): Int {
+
+            val path =
+                try {
+
+                    URI(uri).path
+
+                } catch (_: Exception) {
+
+                    uri.substringBefore('?')
+                }
+
+            val match =
+                Regex(
+                    """trackID=(\d+)""",
+                    RegexOption.IGNORE_CASE
+                )
+                    .find(
+                        path
+                    )
+
+            return match
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toIntOrNull()
+                ?: 0
+        }
 
         private fun sendResponse(
             cseq: String,
@@ -1182,8 +1272,8 @@ class RtspServer(
                     )
 
                     for (
-                    (name, value)
-                    in headers
+                    (name, value) in
+                    headers
                     ) {
 
                         append(
@@ -1191,9 +1281,7 @@ class RtspServer(
                         )
                     }
 
-                    if (
-                        bodyBytes != null
-                    ) {
+                    if (bodyBytes != null) {
 
                         append(
                             "Content-Length: ${bodyBytes.size}\r\n"
@@ -1213,9 +1301,7 @@ class RtspServer(
                     )
                 )
 
-                if (
-                    bodyBytes != null
-                ) {
+                if (bodyBytes != null) {
 
                     output.write(
                         bodyBytes
@@ -1226,34 +1312,18 @@ class RtspServer(
             }
         }
 
-        /*
-         * ========================================================
-         * REQUEST PARSER
-         * ========================================================
-         */
+        private fun readRequest(): RtspRequest? {
 
-        private fun readRequest():
-                RtspRequest? {
-
-            while (
-                active.get()
-            ) {
+            while (active.get()) {
 
                 val first =
                     input.read()
 
-                if (
-                    first < 0
-                ) {
+                if (first < 0) {
                     return null
                 }
 
-                /*
-                 * RTCP interleaved entrant.
-                 */
-                if (
-                    first == 0x24
-                ) {
+                if (first == 0x24) {
 
                     readIncomingInterleaved()
 
@@ -1265,9 +1335,7 @@ class RtspServer(
                         first
                     )
 
-                if (
-                    requestLine.isBlank()
-                ) {
+                if (requestLine.isBlank()) {
                     continue
                 }
 
@@ -1277,9 +1345,7 @@ class RtspServer(
                         limit = 3
                     )
 
-                if (
-                    parts.size != 3
-                ) {
+                if (parts.size != 3) {
 
                     throw SocketException(
                         "Ligne RTSP invalide : $requestLine"
@@ -1296,20 +1362,14 @@ class RtspServer(
                     val line =
                         readLine()
 
-                    if (
-                        line.isEmpty()
-                    ) {
+                    if (line.isEmpty()) {
                         break
                     }
 
                     val index =
-                        line.indexOf(
-                            ':'
-                        )
+                        line.indexOf(':')
 
-                    if (
-                        index > 0
-                    ) {
+                    if (index > 0) {
 
                         headers[
                             line.substring(
@@ -1324,15 +1384,11 @@ class RtspServer(
                 }
 
                 val contentLength =
-                    headers[
-                        "Content-Length"
-                    ]
+                    headers["Content-Length"]
                         ?.toIntOrNull()
                         ?: 0
 
-                if (
-                    contentLength > 0
-                ) {
+                if (contentLength > 0) {
 
                     skipExact(
                         contentLength
@@ -1340,28 +1396,15 @@ class RtspServer(
                 }
 
                 return RtspRequest(
-                    method =
-                        parts[0],
-
-                    uri =
-                        parts[1],
-
-                    version =
-                        parts[2],
-
-                    headers =
-                        headers
+                    method = parts[0],
+                    uri = parts[1],
+                    version = parts[2],
+                    headers = headers
                 )
             }
 
             return null
         }
-
-        /*
-         * ========================================================
-         * INTERLEAVED CLIENT -> SERVEUR
-         * ========================================================
-         */
 
         private fun readIncomingInterleaved() {
 
@@ -1394,12 +1437,6 @@ class RtspServer(
             )
         }
 
-        /*
-         * ========================================================
-         * READ LINE
-         * ========================================================
-         */
-
         private fun readLine(
             firstByte: Int? = null
         ): String {
@@ -1407,9 +1444,7 @@ class RtspServer(
             val buffer =
                 ByteArrayOutputStream()
 
-            if (
-                firstByte != null
-            ) {
+            if (firstByte != null) {
 
                 buffer.write(
                     firstByte
@@ -1421,23 +1456,15 @@ class RtspServer(
                 val value =
                     input.read()
 
-                if (
-                    value < 0
-                ) {
+                if (value < 0) {
                     break
                 }
 
-                if (
-                    value ==
-                    '\n'.code
-                ) {
+                if (value == '\n'.code) {
                     break
                 }
 
-                if (
-                    value !=
-                    '\r'.code
-                ) {
+                if (value != '\r'.code) {
 
                     buffer.write(
                         value
@@ -1462,9 +1489,7 @@ class RtspServer(
                     4096
                 )
 
-            while (
-                remaining > 0
-            ) {
+            while (remaining > 0) {
 
                 val count =
                     input.read(
@@ -1476,9 +1501,7 @@ class RtspServer(
                         )
                     )
 
-                if (
-                    count < 0
-                ) {
+                if (count < 0) {
 
                     throw SocketException(
                         "Connexion fermée"
@@ -1490,17 +1513,9 @@ class RtspServer(
             }
         }
 
-        /*
-         * ========================================================
-         * CLOSE
-         * ========================================================
-         */
-
         override fun close() {
 
-            if (
-                !active.getAndSet(false)
-            ) {
+            if (!active.getAndSet(false)) {
                 return
             }
 
@@ -1514,9 +1529,7 @@ class RtspServer(
             )
 
             try {
-
                 socket.close()
-
             } catch (_: Exception) {
             }
 
@@ -1528,14 +1541,7 @@ class RtspServer(
         }
     }
 
-    /*
-     * ============================================================
-     * SESSION
-     * ============================================================
-     */
-
-    private fun generateSessionId():
-            String {
+    private fun generateSessionId(): String {
 
         val bytes =
             ByteArray(
@@ -1547,28 +1553,17 @@ class RtspServer(
                 bytes
             )
 
-        return bytes.joinToString(
-            ""
-        ) {
+        return bytes.joinToString("") {
 
             "%02x".format(
-                it.toInt()
-                        and 0xFF
+                it.toInt() and 0xFF
             )
         }
     }
 
-    /*
-     * ============================================================
-     * CLOSE
-     * ============================================================
-     */
-
     override fun close() {
 
-        if (
-            !running.getAndSet(false)
-        ) {
+        if (!running.getAndSet(false)) {
             return
         }
 
@@ -1577,27 +1572,18 @@ class RtspServer(
         )
 
         try {
-
-            serverSocket
-                ?.close()
-
+            serverSocket?.close()
         } catch (_: Exception) {
         }
 
-        for (
-        client in
-        clients.toList()
-        ) {
+        for (client in clients.toList()) {
 
             client.close()
         }
 
         clients.clear()
 
-        for (
-        stream in
-        streams.values
-        ) {
+        for (stream in streams.values) {
 
             stream.close()
         }

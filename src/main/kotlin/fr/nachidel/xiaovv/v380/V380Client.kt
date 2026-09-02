@@ -3,12 +3,13 @@ package fr.nachidel.xiaovv.v380
 import fr.nachidel.xiaovv.logging.logger
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.io.FileOutputStream
 import java.io.Closeable
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketException
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.CopyOnWriteArrayList
 
 class V380Client(
     private val host: String,
@@ -16,80 +17,43 @@ class V380Client(
     private val deviceId: String,
     private val username: String,
     private val password: String,
-    private val videoResolution: Int =
-        V380Protocol.RESOLUTION_HIGH
+    private val videoResolution: Int = V380Protocol.RESOLUTION_HIGH
 ) : Closeable {
 
-    private val log =
-        logger<V380Client>()
-
-    init {
-
-        require(host.isNotBlank()) {
-            "L'adresse de la caméra ne peut pas être vide"
-        }
-
-        require(port in 1..65535) {
-            "Port caméra invalide : $port"
-        }
-
-        require(deviceId.isNotBlank()) {
-            "Le Device ID ne peut pas être vide"
-        }
-
-        require(username.isNotBlank()) {
-            "Le nom d'utilisateur ne peut pas être vide"
-        }
-
-        require(
-            videoResolution ==
-                    V380Protocol.RESOLUTION_LOW ||
-                    videoResolution ==
-                    V380Protocol.RESOLUTION_HIGH
-        ) {
-            "Résolution vidéo V380 invalide : $videoResolution"
-        }
-    }
+    private val log = logger<V380Client>()
 
     /*
      * ============================================================
-     * AUTH
+     * CONNEXION AUTHENTIFICATION
      * ============================================================
      */
 
-    private var authSocket: Socket? =
-        null
-
-    private var authInput: BufferedInputStream? =
-        null
-
-    private var authOutput: BufferedOutputStream? =
-        null
+    private var authSocket: Socket? = null
+    private var authInput: BufferedInputStream? = null
+    private var authOutput: BufferedOutputStream? = null
 
     /*
      * ============================================================
-     * STREAM
+     * CONNEXION STREAM
      * ============================================================
      */
 
-    private var streamSocket: Socket? =
-        null
-
-    private var streamInput: BufferedInputStream? =
-        null
-
-    private var streamOutput: BufferedOutputStream? =
-        null
-
-    @Volatile
-    private var mediaStream: V380Stream? =
-        null
-
-    private val streamWriteLock =
-        Any()
-
+    private var streamSocket: Socket? = null
+    private var streamInput: BufferedInputStream? = null
+    private var streamOutput: BufferedOutputStream? = null
+    private var mediaStream: V380Stream? = null
     private val videoListeners =
         CopyOnWriteArrayList<V380Stream.FrameListener>()
+
+    private val audioListeners =
+        CopyOnWriteArrayList<V380Stream.AudioFrameListener>()
+
+    /**
+     * Toutes les commandes de contrôle (PTZ, lumière, audio...)
+     * partagent la même socket STREAM que les commandes d'initialisation.
+     */
+    private val streamWriteLock =
+        Any()
 
     /*
      * ============================================================
@@ -97,22 +61,15 @@ class V380Client(
      * ============================================================
      */
 
-    private val running =
-        AtomicBoolean(false)
+    private val running = AtomicBoolean(false)
+    private val authenticated = AtomicBoolean(false)
+    private val streamConnected = AtomicBoolean(false)
 
-    private val authenticated =
-        AtomicBoolean(false)
-
-    private val streamConnected =
-        AtomicBoolean(false)
-
-    private var loginResponse:
-            V380Auth.LoginResponse? =
-        null
+    private var loginResponse: V380Auth.LoginResponse? = null
 
     private var videoLoginResponse:
-            V380Protocol.VideoLoginResponse? =
-        null
+            V380Protocol.VideoLoginResponse? = null
+
 
     /*
      * ============================================================
@@ -120,15 +77,17 @@ class V380Client(
      * ============================================================
      */
 
-    private val connectTimeoutMs =
-        5_000
+    private val connectTimeoutMs = 5_000
 
-    private val handshakeTimeoutMs =
-        5_000
+    /**
+     * Pendant les handshakes, on ne veut pas rester bloqué
+     * éternellement si la caméra ne répond pas.
+     */
+    private val handshakeTimeoutMs = 5_000
 
     /*
      * ============================================================
-     * COMMANDES
+     * COMMANDES DE CONTRÔLE
      * ============================================================
      */
 
@@ -153,12 +112,6 @@ class V380Client(
     }
 
     companion object {
-
-        /*
-         * ========================================================
-         * PTZ
-         * ========================================================
-         */
 
         private val PTZ_STOP =
             byteArrayOf(
@@ -210,12 +163,6 @@ class V380Client(
                 0x00, 0x00, 0x01, 0x00
             )
 
-        /*
-         * ========================================================
-         * LUMIÈRE
-         * ========================================================
-         */
-
         private val LIGHT_ON =
             byteArrayOf(
                 0xC4.toByte(), 0x00, 0x00, 0x00,
@@ -242,12 +189,6 @@ class V380Client(
                 0x00, 0x01, 0x00, 0x00,
                 0x00, 0x00, 0x00, 0x00
             )
-
-        /*
-         * ========================================================
-         * MODE IMAGE
-         * ========================================================
-         */
 
         private val IMAGE_COLOR =
             byteArrayOf(
@@ -276,10 +217,6 @@ class V380Client(
                 0x00, 0x00, 0x00, 0x00
             )
 
-        /*
-         * Cette commande est un basculement :
-         * chaque appel retourne l'image de 180°.
-         */
         private val IMAGE_FLIP =
             byteArrayOf(
                 0xBE.toByte(), 0x00, 0x00, 0x00,
@@ -296,6 +233,9 @@ class V380Client(
      * ============================================================
      */
 
+    /**
+     * Ouvre uniquement la connexion d'authentification.
+     */
     fun connect() {
 
         val existingSocket =
@@ -327,14 +267,9 @@ class V380Client(
                 name = "AUTH"
             )
 
-        authSocket =
-            connection.socket
-
-        authInput =
-            connection.input
-
-        authOutput =
-            connection.output
+        authSocket = connection.socket
+        authInput = connection.input
+        authOutput = connection.output
 
         log.info(
             "Connexion d'authentification établie"
@@ -351,12 +286,7 @@ class V380Client(
 
         ensureAuthConnected()
 
-        if (
-            !running.compareAndSet(
-                false,
-                true
-            )
-        ) {
+        if (!running.compareAndSet(false, true)) {
 
             log.warn(
                 "Le client Xiaovv est déjà démarré"
@@ -369,14 +299,42 @@ class V380Client(
             "Client Xiaovv démarré"
         )
 
+        log.debug(
+            "Device ID : {}",
+            deviceId
+        )
+
+        log.debug(
+            "Utilisateur : {}",
+            username
+        )
+
         try {
 
+            /*
+             * Étape 1 :
+             *
+             * authentification principale.
+             */
             authenticate()
 
+            /*
+             * La socket AUTH n'est plus nécessaire.
+             */
             closeAuthConnection()
 
+            /*
+             * Étape 2 :
+             *
+             * ouverture de la socket vidéo.
+             */
             openStreamConnection()
 
+            /*
+             * Étape 3 :
+             *
+             * login vidéo 301.
+             */
             loginVideo()
 
             startVideoStream()
@@ -389,12 +347,12 @@ class V380Client(
 
         } catch (e: Exception) {
 
+            running.set(false)
+
             log.error(
                 "Erreur pendant l'initialisation V380",
                 e
             )
-
-            close()
 
             throw e
         }
@@ -402,7 +360,7 @@ class V380Client(
 
     /*
      * ============================================================
-     * AUTHENTIFICATION
+     * AUTHENTIFICATION 31167
      * ============================================================
      */
 
@@ -436,6 +394,10 @@ class V380Client(
             request.size
         )
 
+        /*
+         * On arrête volontairement le dump avant
+         * le bloc cryptographique.
+         */
         log.debug(
             "AUTH TX Header : {}",
             V380Protocol.hex(
@@ -449,6 +411,10 @@ class V380Client(
 
         sendAuth(
             request
+        )
+
+        log.debug(
+            "AUTH attente LOGIN_RESPONSE..."
         )
 
         val responseBytes =
@@ -487,12 +453,8 @@ class V380Client(
             )
         }
 
-        loginResponse =
-            response
-
-        authenticated.set(
-            true
-        )
+        loginResponse = response
+        authenticated.set(true)
 
         log.info(
             "Authentification réussie"
@@ -501,6 +463,11 @@ class V380Client(
         log.info(
             "Version protocole caméra : {}",
             response.protocolVersion
+        )
+
+        log.debug(
+            "Ticket de session : {}",
+            response.authTicket
         )
     }
 
@@ -512,20 +479,11 @@ class V380Client(
 
     private fun openStreamConnection() {
 
-        check(
-            authenticated.get()
-        ) {
+        check(authenticated.get()) {
             "La caméra doit être authentifiée avant d'ouvrir le flux"
         }
 
-        val existingSocket =
-            streamSocket
-
-        if (
-            existingSocket != null &&
-            existingSocket.isConnected &&
-            !existingSocket.isClosed
-        ) {
+        if (streamSocket != null) {
 
             log.warn(
                 "Connexion vidéo déjà ouverte"
@@ -533,8 +491,6 @@ class V380Client(
 
             return
         }
-
-        closeStreamConnection()
 
         log.info(
             "Ouverture de la connexion vidéo à {}:{}",
@@ -547,18 +503,11 @@ class V380Client(
                 name = "STREAM"
             )
 
-        streamSocket =
-            connection.socket
+        streamSocket = connection.socket
+        streamInput = connection.input
+        streamOutput = connection.output
 
-        streamInput =
-            connection.input
-
-        streamOutput =
-            connection.output
-
-        streamConnected.set(
-            true
-        )
+        streamConnected.set(true)
 
         log.info(
             "Connexion vidéo TCP établie"
@@ -567,7 +516,7 @@ class V380Client(
 
     /*
      * ============================================================
-     * LOGIN VIDEO
+     * VIDEO LOGIN 301
      * ============================================================
      */
 
@@ -591,25 +540,64 @@ class V380Client(
             "Ouverture de la session vidéo..."
         )
 
+        log.debug(
+            "Utilisation du ticket de session {}",
+            auth.authTicket
+        )
+
+        /*
+         * Construction du 301.
+         *
+         * IMPORTANT :
+         * authTicket vient de LA SESSION ACTUELLE.
+         */
         val request =
             V380Protocol.buildVideoLoginRequest(
-                deviceId =
-                    numericDeviceId,
-
-                authTicket =
-                    auth.authTicket,
-
+                deviceId = numericDeviceId,
+                authTicket = auth.authTicket,
                 requestFps =
                     V380Protocol.DEFAULT_REQUEST_FPS,
-
-                resolution =
-                    videoResolution
+                resolution = videoResolution
             )
+
+        log.debug(
+            "STREAM TX {} - {} octets",
+            V380Protocol.commandDescription(
+                V380Protocol.getCommand(
+                    request
+                )
+            ),
+            request.size
+        )
+
+        /*
+         * Ici le paquet ne contient pas le mot de passe.
+         * On peut donc afficher son début intégralement.
+         */
+        log.debug(
+            "STREAM TX Header : {}",
+            V380Protocol.hex(
+                request.copyOfRange(
+                    0,
+                    40
+                ),
+                40
+            )
+        )
 
         sendStream(
             request
         )
 
+        log.debug(
+            "STREAM attente VIDEO_LOGIN_RESPONSE..."
+        )
+
+        /*
+         * Dans ton PCAP :
+         *
+         * réponse 401 = 32 octets.
+         */
         val responseBytes =
             readStreamExact(
                 V380Protocol.VIDEO_LOGIN_RESPONSE_SIZE
@@ -662,19 +650,16 @@ class V380Client(
     }
 
     /*
-     * ============================================================
-     * DÉMARRAGE VIDEO
-     * ============================================================
-     */
+ * ============================================================
+ * DÉMARRAGE DU FLUX VIDÉO
+ * ============================================================
+ */
 
     private fun startVideoStream() {
 
         ensureStreamConnected()
 
-        check(
-            videoLoginResponse?.success ==
-                    true
-        ) {
+        check(videoLoginResponse?.success == true) {
             "La session vidéo doit être ouverte avant de démarrer le flux"
         }
 
@@ -682,26 +667,99 @@ class V380Client(
             "Démarrage du flux vidéo..."
         )
 
+        /*
+         * Commande 303.
+         *
+         * Dans notre PCAP :
+         *
+         * 2F 01 00 00
+         * 01 30 00 00
+         * ...
+         */
         val startRequest =
             V380Protocol.buildStartVideoRequest()
+
+        log.debug(
+            "STREAM TX {} - {} octets",
+            V380Protocol.commandDescription(
+                V380Protocol.getCommand(
+                    startRequest
+                )
+            ),
+            startRequest.size
+        )
+
+        log.debug(
+            "STREAM TX HEX : {}",
+            V380Protocol.hex(
+                startRequest,
+                32
+            )
+        )
 
         sendStream(
             startRequest
         )
 
-        Thread.sleep(
-            150
-        )
+        /*
+         * L'application officielle attend environ
+         * 150 ms dans notre capture avant d'envoyer 8449.
+         */
+        Thread.sleep(150)
 
+        /*
+         * Commande 8449.
+         */
         val initRequest =
             V380Protocol.buildStreamInitRequest()
+
+        log.debug(
+            "STREAM TX {} - {} octets",
+            V380Protocol.commandDescription(
+                V380Protocol.getCommand(
+                    initRequest
+                )
+            ),
+            initRequest.size
+        )
+
+        log.debug(
+            "STREAM TX HEX : {}",
+            V380Protocol.hex(
+                initRequest,
+                initRequest.size
+            )
+        )
 
         sendStream(
             initRequest
         )
 
+        /*
+         * Activation audio observée dans la capture officielle :
+         * commande 8449 avec le flag 0x1001.
+         */
+        Thread.sleep(100)
+
+        val audioRequest =
+            V380Protocol.buildAudioControlRequest(
+                enabled = true
+            )
+
+        log.debug(
+            "STREAM TX AUDIO ON : {}",
+            V380Protocol.hex(
+                audioRequest,
+                audioRequest.size
+            )
+        )
+
+        sendStream(
+            audioRequest
+        )
+
         log.info(
-            "Commandes de démarrage vidéo envoyées"
+            "Commandes de démarrage vidéo + audio envoyées"
         )
 
         log.info(
@@ -709,11 +767,205 @@ class V380Client(
         )
     }
 
+
     /*
      * ============================================================
-     * STREAM CONTINU
+     * TEST DE RÉCEPTION VIDÉO
      * ============================================================
      */
+
+    private fun readFirstVideoFrames(
+        frameCount: Int
+    ) {
+
+        require(frameCount > 0) {
+            "frameCount doit être supérieur à zéro"
+        }
+
+        ensureStreamConnected()
+
+        val input =
+            streamInput
+                ?: throw IllegalStateException(
+                    "Flux STREAM d'entrée non initialisé"
+                )
+
+        val auth =
+            loginResponse
+                ?: throw IllegalStateException(
+                    "Ticket d'authentification absent"
+                )
+
+        /*
+         * Parser du protocole V380.
+         */
+        val parser =
+            V380MediaParser()
+
+        /*
+         * Décodeur AES / H.265.
+         */
+        val decoder =
+            V380MediaDecoder(
+                authTicket = auth.authTicket
+            )
+
+        /*
+         * Fichier HEVC brut.
+         *
+         * Il sera créé dans le répertoire
+         * depuis lequel le programme est lancé.
+         */
+        val outputFile =
+            "xiaovv-test.h265"
+
+        log.info(
+            "Enregistrement du flux H.265 dans {}",
+            outputFile
+        )
+
+        var receivedVideoFrames = 0
+        var writtenBytes = 0L
+        var decodedFrames = 0
+
+        BufferedOutputStream(
+            FileOutputStream(outputFile)
+        ).use { videoOutput ->
+
+            while (
+                receivedVideoFrames <
+                frameCount
+            ) {
+
+                /*
+                 * Lecture et assemblage d'une frame complète.
+                 */
+                val frame =
+                    parser.readNextFrame(
+                        input
+                    )
+
+                /*
+                 * On ignore les types non vidéo.
+                 */
+                if (!frame.isVideo) {
+
+                    log.debug(
+                        "MEDIA frame ignorée : type=0x{}, {} octets",
+                        frame.type
+                            .toString(16)
+                            .uppercase()
+                            .padStart(2, '0'),
+                        frame.data.size
+                    )
+
+                    continue
+                }
+
+                receivedVideoFrames++
+
+                try {
+
+                    /*
+                     * Déchiffrement + retrait du header interne.
+                     */
+                    val decoded =
+                        decoder.decode(
+                            frame
+                        )
+
+                    decodedFrames++
+
+                    /*
+                     * Écriture du bitstream HEVC brut.
+                     */
+                    videoOutput.write(
+                        decoded.payload
+                    )
+
+                    writtenBytes +=
+                        decoded.payload.size
+
+                    log.info(
+                        "VIDEO [{}/{}] type=0x{}, NAL={}, keyframe={}, {} octets",
+                        receivedVideoFrames,
+                        frameCount,
+                        frame.type
+                            .toString(16)
+                            .uppercase()
+                            .padStart(2, '0'),
+                        decoded.nalType
+                            ?.toString()
+                            ?: "?",
+                        decoded.keyFrame,
+                        decoded.payload.size
+                    )
+
+                    /*
+                     * Pour les premières frames seulement,
+                     * on affiche le début du flux déchiffré.
+                     */
+                    if (
+                        receivedVideoFrames <= 5
+                    ) {
+
+                        log.debug(
+                            "H265 début frame : {}",
+                            V380Protocol.hex(
+                                decoded.payload,
+                                48
+                            )
+                        )
+                    }
+
+                } catch (e: Exception) {
+
+                    log.error(
+                        "Erreur pendant le décodage de la frame {} " +
+                                "(type=0x{})",
+                        receivedVideoFrames,
+                        frame.type
+                            .toString(16)
+                            .uppercase(),
+                        e
+                    )
+
+                    throw e
+                }
+            }
+
+            /*
+             * Force l'écriture disque avant fermeture.
+             */
+            videoOutput.flush()
+        }
+
+        log.info(
+            "{} frames vidéo reçues",
+            receivedVideoFrames
+        )
+
+        log.info(
+            "{} frames vidéo décodées",
+            decodedFrames
+        )
+
+        log.info(
+            "{} octets H.265 écrits dans {}",
+            writtenBytes,
+            outputFile
+        )
+
+        log.info(
+            "Capture H.265 terminée"
+        )
+    }
+
+    /*
+ * ============================================================
+ * STREAM CONTINU
+ * ============================================================
+ */
 
     private fun startContinuousStream() {
 
@@ -731,9 +983,7 @@ class V380Client(
                     "Ticket de session absent"
                 )
 
-        check(
-            mediaStream == null
-        ) {
+        check(mediaStream == null) {
             "Le flux média est déjà initialisé"
         }
 
@@ -743,19 +993,20 @@ class V380Client(
 
         val stream =
             V380Stream(
-                input =
-                    input,
-
-                authTicket =
-                    auth.authTicket
+                input = input,
+                authTicket = auth.authTicket
             )
 
-        for (
-        listener in
-        videoListeners
-        ) {
+        for (listener in videoListeners) {
 
             stream.addListener(
+                listener
+            )
+        }
+
+        for (listener in audioListeners) {
+
+            stream.addAudioListener(
                 listener
             )
         }
@@ -764,6 +1015,38 @@ class V380Client(
             stream
 
         stream.start()
+    }
+
+    /*
+     * ============================================================
+     * AUDIO
+     * ============================================================
+     */
+
+    fun audioOn() {
+
+        sendStream(
+            V380Protocol.buildAudioControlRequest(
+                enabled = true
+            )
+        )
+
+        log.info(
+            "AUDIO : ON"
+        )
+    }
+
+    fun audioOff() {
+
+        sendStream(
+            V380Protocol.buildAudioControlRequest(
+                enabled = false
+            )
+        )
+
+        log.info(
+            "AUDIO : OFF"
+        )
     }
 
     /*
@@ -778,26 +1061,14 @@ class V380Client(
 
         val command =
             when (direction) {
-
-                PtzDirection.UP ->
-                    PTZ_UP
-
-                PtzDirection.DOWN ->
-                    PTZ_DOWN
-
-                PtzDirection.LEFT ->
-                    PTZ_LEFT
-
-                PtzDirection.RIGHT ->
-                    PTZ_RIGHT
-
-                PtzDirection.STOP ->
-                    PTZ_STOP
+                PtzDirection.UP -> PTZ_UP
+                PtzDirection.DOWN -> PTZ_DOWN
+                PtzDirection.LEFT -> PTZ_LEFT
+                PtzDirection.RIGHT -> PTZ_RIGHT
+                PtzDirection.STOP -> PTZ_STOP
             }
 
-        sendStream(
-            command
-        )
+        sendStream(command)
 
         log.info(
             "PTZ : {}",
@@ -805,25 +1076,11 @@ class V380Client(
         )
     }
 
-    fun ptzUp() {
-        ptz(PtzDirection.UP)
-    }
-
-    fun ptzDown() {
-        ptz(PtzDirection.DOWN)
-    }
-
-    fun ptzLeft() {
-        ptz(PtzDirection.LEFT)
-    }
-
-    fun ptzRight() {
-        ptz(PtzDirection.RIGHT)
-    }
-
-    fun ptzStop() {
-        ptz(PtzDirection.STOP)
-    }
+    fun ptzUp() = ptz(PtzDirection.UP)
+    fun ptzDown() = ptz(PtzDirection.DOWN)
+    fun ptzLeft() = ptz(PtzDirection.LEFT)
+    fun ptzRight() = ptz(PtzDirection.RIGHT)
+    fun ptzStop() = ptz(PtzDirection.STOP)
 
     /*
      * ============================================================
@@ -837,20 +1094,12 @@ class V380Client(
 
         val command =
             when (mode) {
-
-                LightMode.ON ->
-                    LIGHT_ON
-
-                LightMode.OFF ->
-                    LIGHT_OFF
-
-                LightMode.AUTO ->
-                    LIGHT_AUTO
+                LightMode.ON -> LIGHT_ON
+                LightMode.OFF -> LIGHT_OFF
+                LightMode.AUTO -> LIGHT_AUTO
             }
 
-        sendStream(
-            command
-        )
+        sendStream(command)
 
         log.info(
             "LUMIÈRE : {}",
@@ -858,21 +1107,13 @@ class V380Client(
         )
     }
 
-    fun lightOn() {
-        light(LightMode.ON)
-    }
-
-    fun lightOff() {
-        light(LightMode.OFF)
-    }
-
-    fun lightAuto() {
-        light(LightMode.AUTO)
-    }
+    fun lightOn() = light(LightMode.ON)
+    fun lightOff() = light(LightMode.OFF)
+    fun lightAuto() = light(LightMode.AUTO)
 
     /*
      * ============================================================
-     * MODE IMAGE
+     * IMAGE
      * ============================================================
      */
 
@@ -882,20 +1123,12 @@ class V380Client(
 
         val command =
             when (mode) {
-
-                ImageMode.COLOR ->
-                    IMAGE_COLOR
-
-                ImageMode.BW ->
-                    IMAGE_BW
-
-                ImageMode.AUTO ->
-                    IMAGE_AUTO
+                ImageMode.COLOR -> IMAGE_COLOR
+                ImageMode.BW -> IMAGE_BW
+                ImageMode.AUTO -> IMAGE_AUTO
             }
 
-        sendStream(
-            command
-        )
+        sendStream(command)
 
         log.info(
             "IMAGE : {}",
@@ -903,32 +1136,18 @@ class V380Client(
         )
     }
 
-    fun imageColor() {
-        imageMode(ImageMode.COLOR)
-    }
-
-    fun imageBw() {
-        imageMode(ImageMode.BW)
-    }
-
-    fun imageAuto() {
-        imageMode(ImageMode.AUTO)
-    }
+    fun imageColor() = imageMode(ImageMode.COLOR)
+    fun imageBw() = imageMode(ImageMode.BW)
+    fun imageAuto() = imageMode(ImageMode.AUTO)
 
     fun imageFlip() {
-
-        sendStream(
-            IMAGE_FLIP
-        )
-
-        log.info(
-            "IMAGE : FLIP"
-        )
+        sendStream(IMAGE_FLIP)
+        log.info("IMAGE : FLIP")
     }
 
     /*
      * ============================================================
-     * SOCKET
+     * OUVERTURE SOCKET
      * ============================================================
      */
 
@@ -947,14 +1166,17 @@ class V380Client(
 
         try {
 
-            socket.tcpNoDelay =
-                true
-
-            socket.keepAlive =
-                true
+            socket.tcpNoDelay = true
+            socket.keepAlive = true
 
             socket.soTimeout =
                 handshakeTimeoutMs
+
+            log.debug(
+                "{} ouverture socket TCP - timeout={} ms",
+                name,
+                connectTimeoutMs
+            )
 
             socket.connect(
                 InetSocketAddress(
@@ -975,21 +1197,23 @@ class V380Client(
                 )
 
             log.debug(
-                "{} connexion ouverte {}:{}",
+                "{} adresse locale : {}:{}",
+                name,
+                socket.localAddress.hostAddress,
+                socket.localPort
+            )
+
+            log.debug(
+                "{} adresse distante : {}:{}",
                 name,
                 socket.inetAddress.hostAddress,
                 socket.port
             )
 
             return Connection(
-                socket =
-                    socket,
-
-                input =
-                    input,
-
-                output =
-                    output
+                socket = socket,
+                input = input,
+                output = output
             )
 
         } catch (e: Exception) {
@@ -998,6 +1222,14 @@ class V380Client(
                 socket.close()
             } catch (_: Exception) {
             }
+
+            log.error(
+                "{} impossible d'ouvrir la connexion à {}:{}",
+                name,
+                host,
+                port,
+                e
+            )
 
             throw e
         }
@@ -1024,6 +1256,11 @@ class V380Client(
         )
 
         output.flush()
+
+        log.debug(
+            "AUTH TX {} octets",
+            data.size
+        )
     }
 
     private fun readAuthExact(
@@ -1037,14 +1274,9 @@ class V380Client(
                 )
 
         return readExact(
-            name =
-                "AUTH",
-
-            input =
-                input,
-
-            size =
-                size
+            name = "AUTH",
+            input = input,
+            size = size
         )
     }
 
@@ -1086,9 +1318,7 @@ class V380Client(
 
         } catch (e: SocketException) {
 
-            streamConnected.set(
-                false
-            )
+            streamConnected.set(false)
 
             log.error(
                 "Connexion vidéo perdue pendant l'envoi",
@@ -1112,16 +1342,17 @@ class V380Client(
                 )
 
         return readExact(
-            name =
-                "STREAM",
-
-            input =
-                input,
-
-            size =
-                size
+            name = "STREAM",
+            input = input,
+            size = size
         )
     }
+
+    /*
+     * ============================================================
+     * LECTURE EXACTE TCP
+     * ============================================================
+     */
 
     private fun readExact(
         name: String,
@@ -1129,22 +1360,16 @@ class V380Client(
         size: Int
     ): ByteArray {
 
-        require(
-            size > 0
-        )
+        require(size > 0) {
+            "La taille doit être supérieure à zéro"
+        }
 
         val buffer =
-            ByteArray(
-                size
-            )
+            ByteArray(size)
 
-        var offset =
-            0
+        var offset = 0
 
-        while (
-            offset <
-            size
-        ) {
+        while (offset < size) {
 
             val count =
                 input.read(
@@ -1153,18 +1378,29 @@ class V380Client(
                     size - offset
                 )
 
-            if (
-                count == -1
-            ) {
+            if (count == -1) {
 
                 throw SocketException(
                     "$name : connexion fermée par la caméra"
                 )
             }
 
-            offset +=
-                count
+            offset += count
+
+            log.debug(
+                "{} RX fragment : {} octets ({}/{})",
+                name,
+                count,
+                offset,
+                size
+            )
         }
+
+        log.debug(
+            "{} RX paquet complet : {} octets",
+            name,
+            size
+        )
 
         return buffer
     }
@@ -1242,12 +1478,6 @@ class V380Client(
         return videoLoginResponse?.fps
     }
 
-    /*
-     * ============================================================
-     * LISTENERS
-     * ============================================================
-     */
-
     fun addVideoListener(
         listener: V380Stream.FrameListener
     ) {
@@ -1256,10 +1486,15 @@ class V380Client(
             listener
         )
 
-        mediaStream
-            ?.addListener(
-                listener
-            )
+        /*
+         * Si le stream existe déjà, branche immédiatement.
+         *
+         * Sinon il sera branché automatiquement
+         * lors du prochain démarrage.
+         */
+        mediaStream?.addListener(
+            listener
+        )
     }
 
     fun removeVideoListener(
@@ -1270,19 +1505,56 @@ class V380Client(
             listener
         )
 
-        mediaStream
-            ?.removeListener(
-                listener
-            )
+        mediaStream?.removeListener(
+            listener
+        )
+    }
+
+    fun addAudioListener(
+        listener: V380Stream.AudioFrameListener
+    ) {
+
+        audioListeners.addIfAbsent(
+            listener
+        )
+
+        mediaStream?.addAudioListener(
+            listener
+        )
+    }
+
+    fun removeAudioListener(
+        listener: V380Stream.AudioFrameListener
+    ) {
+
+        audioListeners.remove(
+            listener
+        )
+
+        mediaStream?.removeAudioListener(
+            listener
+        )
     }
 
     /*
      * ============================================================
-     * CLOSE AUTH
+     * FERMETURE AUTH
      * ============================================================
      */
 
     private fun closeAuthConnection() {
+
+        if (
+            authSocket == null &&
+            authInput == null &&
+            authOutput == null
+        ) {
+            return
+        }
+
+        log.debug(
+            "Fermeture de la connexion AUTH"
+        )
 
         try {
             authInput?.close()
@@ -1299,26 +1571,35 @@ class V380Client(
         } catch (_: Exception) {
         }
 
-        authInput =
-            null
+        authInput = null
+        authOutput = null
+        authSocket = null
 
-        authOutput =
-            null
-
-        authSocket =
-            null
+        log.debug(
+            "Connexion AUTH fermée"
+        )
     }
 
     /*
      * ============================================================
-     * CLOSE STREAM
+     * FERMETURE STREAM
      * ============================================================
      */
 
     private fun closeStreamConnection() {
 
-        streamConnected.set(
-            false
+        streamConnected.set(false)
+
+        if (
+            streamSocket == null &&
+            streamInput == null &&
+            streamOutput == null
+        ) {
+            return
+        }
+
+        log.debug(
+            "Fermeture de la connexion STREAM"
         )
 
         try {
@@ -1336,21 +1617,14 @@ class V380Client(
         } catch (_: Exception) {
         }
 
-        streamInput =
-            null
+        streamInput = null
+        streamOutput = null
+        streamSocket = null
 
-        streamOutput =
-            null
-
-        streamSocket =
-            null
+        log.debug(
+            "Connexion STREAM fermée"
+        )
     }
-
-    /*
-     * ============================================================
-     * AWAIT
-     * ============================================================
-     */
 
     fun await() {
 
@@ -1360,9 +1634,7 @@ class V380Client(
                     "Le flux vidéo n'est pas démarré"
                 )
 
-        log.info(
-            "Client en fonctionnement continu"
-        )
+        log.info("Client en fonctionnement continu")
 
         stream.await()
     }
@@ -1383,15 +1655,12 @@ class V380Client(
                     mediaStream != null
 
         if (hadActiveState) {
-
             log.info(
                 "Fermeture des connexions caméra"
             )
         }
 
-        running.set(
-            false
-        )
+        running.set(false)
 
         try {
             mediaStream?.stop()
@@ -1399,44 +1668,27 @@ class V380Client(
         }
 
         closeStreamConnection()
-
         closeAuthConnection()
 
         try {
-
-            mediaStream
-                ?.await(
-                    2_000
-                )
-
+            mediaStream?.await(
+                2_000
+            )
         } catch (_: InterruptedException) {
-
-            Thread.currentThread()
-                .interrupt()
+            Thread.currentThread().interrupt()
         }
 
-        mediaStream =
-            null
-
-        authenticated.set(
-            false
-        )
-
-        streamConnected.set(
-            false
-        )
-
-        loginResponse =
-            null
-
-        videoLoginResponse =
-            null
+        mediaStream = null
+        authenticated.set(false)
+        streamConnected.set(false)
+        loginResponse = null
+        videoLoginResponse = null
 
         if (hadActiveState) {
-
             log.info(
                 "Connexions caméra fermées"
             )
         }
     }
+
 }
