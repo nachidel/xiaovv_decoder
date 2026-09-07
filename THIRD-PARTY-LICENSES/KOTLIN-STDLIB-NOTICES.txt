@@ -1,0 +1,20 @@
+Kotlin standard library third-party notice summary
+
+The Kotlin standard library is distributed under Apache License 2.0 for
+JetBrains-owned code. The upstream Kotlin license documentation also identifies
+third-party-derived portions in the standard library.
+
+Relevant JVM/common stdlib notices include:
+- collections: derived from GWT, Copyright (c) 2007-08 Google Inc., Apache 2.0;
+- kotlin.time: portions derived from ThreeTenBP, Copyright (c) 2007-present
+  Stephen Colebourne & Michael Nascimento Santos, BSD 3-Clause;
+- UnsignedJVM: derived from Guava, Copyright (c) 2011 The Guava Authors,
+  Apache 2.0;
+- MathJVM: derived from Boost special math functions, Copyright Eric Ford &
+  Hubert Holin 2001, Boost Software License 1.0.
+
+Relevant license texts are included in this directory as APACHE-2.0.txt,
+THREETENBP-BSD-3-CLAUSE.txt and BOOST-1.0.txt.
+
+Upstream license documentation:
+https://github.com/JetBrains/kotlin/tree/master/license

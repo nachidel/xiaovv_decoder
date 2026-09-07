@@ -1,0 +1,11 @@
+JmDNS attribution notice
+
+JmDNS is licensed under the Apache License, Version 2.0.
+
+Attribution listed by the upstream project:
+Arthur van Hoff <avh@strangeberry.com>
+Rick Blair <rickblair@mac.com>
+Kai Kreuzer <kai@openhab.org>
+
+Upstream project:
+https://github.com/jmdns/jmdns

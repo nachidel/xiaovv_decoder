@@ -1,0 +1,17 @@
+FastDoubleParser / Jackson shaded-code notice
+
+Jackson-core bundles a shaded copy of FastDoubleParser.
+FastDoubleParser is available under the MIT License.
+Copyright (c) 2023 Werner Randelshofer, Switzerland.
+
+The FastDoubleParser upstream project identifies derived portions from:
+- fast_float, licensed under MIT; and
+- bigint, Copyright 2020 Tim Buktu, licensed under BSD 2-Clause.
+
+Relevant license texts included here:
+- FASTDOUBLEPARSER-MIT.txt
+- FASTFLOAT-MIT.txt
+- BIGINT-BSD-2-CLAUSE.txt
+
+Upstream information:
+https://github.com/wrandelshofer/FastDoubleParser

@@ -1,55 +1,53 @@
 # Third-party notices
 
-Xiaovv Decoder contains or depends on third-party software. The PolyForm Noncommercial License 1.0.0 applies to Xiaovv Decoder's own code and does not replace the licenses of third-party components.
+Xiaovv Decoder contains or depends on third-party software. The PolyForm
+Noncommercial License 1.0.0 applies only to Xiaovv Decoder's own code and does
+not replace the licenses of third-party components.
 
-The versions below correspond to the direct runtime dependencies declared in `build.gradle.kts` at the time this notice was prepared. The Gradle/Kotlin runtime may also resolve additional transitive components. Packaged distributions must include the license and notice files collected from the actual resolved runtime dependencies.
+Packaged distributions include a `THIRD-PARTY-LICENSES/` directory containing
+license texts, attribution notices and a component-to-license map.
 
 ## Direct runtime dependencies
 
-### SLF4J API 2.0.18
+The versions below are declared by the current `build.gradle.kts` or normally
+resolved by the Kotlin JVM plugin used by this project.
 
-- Artifact: `org.slf4j:slf4j-api:2.0.18`
-- License: MIT License
-- Project license: https://www.slf4j.org/license.html
+| Component | Version | License |
+|---|---:|---|
+| SLF4J API | 2.0.18 | MIT |
+| Logback Classic / Core | 1.6.3 | EPL-2.0 or LGPL-2.1 |
+| Kotlin Coroutines Core JVM | 1.10.2 | Apache-2.0 |
+| Eclipse Paho MQTT Java Client | 1.2.5 | EPL-2.0 / EDL-1.0 dual licensing |
+| ChromeCast Java API V2 | 0.12.20 | Apache-2.0 |
+| Kotlin standard library | 2.4.0 (normally supplied by Kotlin plugin) | Apache-2.0 plus upstream third-party notices |
 
-### Logback Classic 1.6.3 / Logback Core 1.6.3
+## Known runtime transitives
 
-- Artifact: `ch.qos.logback:logback-classic:1.6.3`
-- Runtime component: `ch.qos.logback:logback-core:1.6.3`
-- License: dual-licensed under Eclipse Public License 2.0 or GNU Lesser General Public License 2.1, at the licensee's choice
-- Project license: https://logback.qos.ch/license.html
+`chromecast-java-api-v2:0.12.20` declares Jackson, Protobuf Javalite, JmDNS and
+SLF4J as compile dependencies. The current static license bundle therefore also
+contains notices/licenses for:
 
-### Kotlin Coroutines 1.10.2
+- Jackson Annotations 2.20;
+- Jackson Databind 2.20.0;
+- Jackson Core 2.20.0, including its shaded FastDoubleParser notices;
+- Protobuf Javalite 4.33.2;
+- JmDNS 3.6.3;
+- JetBrains annotations used by Kotlin/Coroutines.
 
-- Artifact: `org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2`
-- License: Apache License 2.0
-- Project: https://github.com/Kotlin/kotlinx.coroutines
+See `THIRD-PARTY-LICENSES/COMPONENTS.md` for the detailed mapping.
 
-### Eclipse Paho MQTT Java Client 1.2.5
+## Native Java runtime
 
-- Artifact: `org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5`
-- Maven metadata license: Eclipse Public License 2.0
-- Source headers also reference the Eclipse Distribution License 1.0 where applicable
-- Project: https://projects.eclipse.org/projects/iot.paho
-- EPL 2.0: https://www.eclipse.org/legal/epl-2.0/
+The Windows and Linux `jpackage` distributions contain a Java runtime.
+`jpackage` preserves that runtime's own legal files under `runtime/legal/`.
+That directory must not be removed from redistributed native packages.
 
-### ChromeCast Java API V2 0.12.20
+## Dependency changes
 
-- Artifact: `de.sfuhrm:chromecast-java-api-v2:0.12.20`
-- License: Apache License 2.0
-- Project: https://github.com/sfuhrm/chromecast-java-api-v2
+This notice reflects the dependency versions checked when this file was
+prepared. Gradle may resolve a different version if dependencies, constraints or
+plugin versions are changed later. When upgrading dependencies, review and
+update `THIRD-PARTY-LICENSES/` as part of the release process.
 
-### Kotlin standard library
-
-- The Kotlin JVM plugin normally adds the Kotlin standard library to the runtime classpath.
-- Version: the version actually resolved by Gradle for the build
-- License: Apache License 2.0 for JetBrains-owned Kotlin code; some portions of the Kotlin repository may carry additional third-party notices
-- Project: https://github.com/JetBrains/kotlin
-
-## Transitive dependencies
-
-`chromecast-java-api-v2` and other components may bring additional runtime dependencies. Do not treat the list above as a complete legal inventory of every class contained in the final fat JAR.
-
-The build should collect `LICENSE`, `NOTICE`, `COPYING` and similar files from every resolved runtime dependency and ship them under `THIRD-PARTY-LICENSES/`.
-
-Where a dependency's own packaged notice conflicts with this summary, the dependency's original license and notice files control.
+Where an upstream component's original license or notice conflicts with this
+summary, the upstream license/notice controls.

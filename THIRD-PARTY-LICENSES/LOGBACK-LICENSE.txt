@@ -1,0 +1,14 @@
+Logback license notice
+
+Logback: the reliable, generic, fast and flexible logging framework.
+Copyright (C) 1999-2026, QOS.ch. All rights reserved.
+
+Logback source code and binaries are dual-licensed under either:
+- the Eclipse Public License v2.0; or
+- at the licensee's choice, the GNU Lesser General Public License version 2.1.
+
+Copies of both license texts are included in this directory as EPL-2.0.txt
+and LGPL-2.1.txt.
+
+Upstream license information:
+https://logback.qos.ch/license.html

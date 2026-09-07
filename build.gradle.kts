@@ -158,6 +158,10 @@ val prepareRelease =
         from(layout.projectDirectory.file("NOTICE"))
         from(layout.projectDirectory.file("COMMERCIAL-LICENSING.md"))
         from(layout.projectDirectory.file("THIRD-PARTY-NOTICES.md"))
+
+        from(layout.projectDirectory.dir("THIRD-PARTY-LICENSES")) {
+            into("THIRD-PARTY-LICENSES")
+        }
     }
 
 val packageRelease =
@@ -355,6 +359,10 @@ val prepareWindowsPackage =
         from(layout.projectDirectory.file("NOTICE"))
         from(layout.projectDirectory.file("COMMERCIAL-LICENSING.md"))
         from(layout.projectDirectory.file("THIRD-PARTY-NOTICES.md"))
+
+        from(layout.projectDirectory.dir("THIRD-PARTY-LICENSES")) {
+            into("THIRD-PARTY-LICENSES")
+        }
     }
 
 val packageWindows =
@@ -582,6 +590,10 @@ val prepareLinuxPackage =
         from(layout.projectDirectory.file("NOTICE"))
         from(layout.projectDirectory.file("COMMERCIAL-LICENSING.md"))
         from(layout.projectDirectory.file("THIRD-PARTY-NOTICES.md"))
+
+        from(layout.projectDirectory.dir("THIRD-PARTY-LICENSES")) {
+            into("THIRD-PARTY-LICENSES")
+        }
     }
 
 val packageLinux =
