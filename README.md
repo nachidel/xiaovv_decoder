@@ -246,7 +246,7 @@ Xiaovv Decoder est un logiciel **source-available** distribué sous **PolyForm N
 
 Les usages non commerciaux autorisés par cette licence sont gratuits. Le texte officiel de la licence fait foi :
 
-https://polyformproject.org/licenses/noncommercial/1.0.0/
+https://polyformproject.org/licenses/noncommercial/1.0.0
 
 **Aucun droit d'utilisation commerciale n'est accordé par la licence publique.**
 

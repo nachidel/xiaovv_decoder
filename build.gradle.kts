@@ -153,6 +153,11 @@ val prepareRelease =
                 "README.md"
             )
         )
+
+        from(layout.projectDirectory.file("LICENSE"))
+        from(layout.projectDirectory.file("NOTICE"))
+        from(layout.projectDirectory.file("COMMERCIAL-LICENSING.md"))
+        from(layout.projectDirectory.file("THIRD-PARTY-NOTICES.md"))
     }
 
 val packageRelease =
@@ -345,6 +350,11 @@ val prepareWindowsPackage =
                 "README.md"
             )
         )
+
+        from(layout.projectDirectory.file("LICENSE"))
+        from(layout.projectDirectory.file("NOTICE"))
+        from(layout.projectDirectory.file("COMMERCIAL-LICENSING.md"))
+        from(layout.projectDirectory.file("THIRD-PARTY-NOTICES.md"))
     }
 
 val packageWindows =
@@ -567,6 +577,11 @@ val prepareLinuxPackage =
                 "README.md"
             )
         )
+
+        from(layout.projectDirectory.file("LICENSE"))
+        from(layout.projectDirectory.file("NOTICE"))
+        from(layout.projectDirectory.file("COMMERCIAL-LICENSING.md"))
+        from(layout.projectDirectory.file("THIRD-PARTY-NOTICES.md"))
     }
 
 val packageLinux =
