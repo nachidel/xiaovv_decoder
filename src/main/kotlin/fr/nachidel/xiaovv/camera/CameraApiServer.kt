@@ -5277,8 +5277,8 @@ body.wall-only .interface-toggle {
 
 .cast-button {
     position: absolute;
-    left: 10px;
-    bottom: 10px;
+    left: 5px;
+    bottom: 5px;
     z-index: 12;
 
     display: flex;
