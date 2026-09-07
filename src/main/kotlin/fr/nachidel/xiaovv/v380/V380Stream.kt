@@ -403,7 +403,7 @@ class V380Stream(
                                     currentFps
                             )
 
-                        log.info(
+                        log.debug(
                             "VIDEO stats : {} frames | {} fps | {} keyframes | {} Mo reçus",
                             totalFrames,
                             formatDouble(
@@ -419,7 +419,7 @@ class V380Stream(
 
                         if (totalAudioFrames > 0) {
 
-                            log.info(
+                            log.debug(
                                 "AUDIO stats : {} frames AAC | {} Mo reçus",
                                 totalAudioFrames,
                                 formatDouble(

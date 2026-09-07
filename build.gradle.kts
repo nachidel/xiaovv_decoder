@@ -28,6 +28,8 @@ dependencies {
     implementation("org.slf4j:slf4j-api:2.0.18")
     runtimeOnly("ch.qos.logback:logback-classic:1.6.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+    implementation("org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5")
+    implementation("de.sfuhrm:chromecast-java-api-v2:0.12.20")
 
     testImplementation(kotlin("test"))
 }

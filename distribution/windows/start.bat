@@ -18,6 +18,19 @@ if exist "%~dp0xiaovv-env.bat" (
 )
 
 REM ============================================================
+REM CONFIGURATION MQTT EXTERNE
+REM ============================================================
+REM
+REM MqttConfigFileManager respecte XIAOVV_MQTT_CONFIG.
+REM Si rien n'est fourni par l'utilisateur, on garde mqtt.properties
+REM a la racine de la distribution, donc hors du JAR / app jpackage.
+REM
+
+if not defined XIAOVV_MQTT_CONFIG (
+    set "XIAOVV_MQTT_CONFIG=%~dp0mqtt.properties"
+)
+
+REM ============================================================
 REM VERIFICATIONS
 REM ============================================================
 

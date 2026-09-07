@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.CopyOnWriteArrayList
 
 class V380Client(
+    private val name: String,
     private val host: String,
     private val port: Int = 8800,
     private val deviceId: String,
@@ -62,6 +63,7 @@ class V380Client(
      */
 
     private val running = AtomicBoolean(false)
+    private val closed = AtomicBoolean(false)
     private val authenticated = AtomicBoolean(false)
     private val streamConnected = AtomicBoolean(false)
 
@@ -123,22 +125,30 @@ class V380Client(
                 0x00, 0x00, 0x01, 0x00
             )
 
+        /*
+         * Sens vérifié physiquement sur les caméras Xiaovv :
+         * 0x03EA = déplacement vers la droite.
+         */
         private val PTZ_RIGHT =
             byteArrayOf(
                 0xAA.toByte(), 0x00, 0x00, 0x00,
                 0xE8.toByte(), 0x03,
                 0xE8.toByte(), 0x03,
-                0xE9.toByte(), 0x03,
+                0xEA.toByte(), 0x03,
                 0xE8.toByte(), 0x03,
                 0x00, 0x00, 0x01, 0x00
             )
 
+        /*
+         * Sens vérifié physiquement sur les caméras Xiaovv :
+         * 0x03E9 = déplacement vers la gauche.
+         */
         private val PTZ_LEFT =
             byteArrayOf(
                 0xAA.toByte(), 0x00, 0x00, 0x00,
                 0xE8.toByte(), 0x03,
                 0xE8.toByte(), 0x03,
-                0xEA.toByte(), 0x03,
+                0xE9.toByte(), 0x03,
                 0xE8.toByte(), 0x03,
                 0x00, 0x00, 0x01, 0x00
             )
@@ -1647,18 +1657,24 @@ class V380Client(
 
     override fun close() {
 
+        /*
+         * close() peut être appelé depuis plusieurs chemins :
+         * - arrêt à la demande RTSP ;
+         * - finally du superviseur ;
+         * - erreur pendant l'initialisation.
+         *
+         * Un seul appel effectue réellement la fermeture.
+         */
+        if (!closed.compareAndSet(false, true)) {
+            return
+        }
+
         val hadActiveState =
             running.get() ||
                     authenticated.get() ||
                     authSocket != null ||
                     streamSocket != null ||
                     mediaStream != null
-
-        if (hadActiveState) {
-            log.info(
-                "Fermeture des connexions caméra"
-            )
-        }
 
         running.set(false)
 
@@ -1686,7 +1702,8 @@ class V380Client(
 
         if (hadActiveState) {
             log.info(
-                "Connexions caméra fermées"
+                "Connexions caméra fermées ({})",
+                name
             )
         }
     }

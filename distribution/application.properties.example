@@ -45,3 +45,21 @@ camera.example.password-env=XIAOVV_CAMERA_EXAMPLE_PASSWORD
 
 camera.example.resolution=high
 camera.example.reconnect-delay-ms=5000
+
+# ============================================================
+# MQTT
+# ============================================================
+#
+# La configuration MQTT est volontairement séparée dans :
+#
+#     mqtt.properties
+#
+# Voir mqtt.properties.example.
+#
+# Les lanceurs de cette distribution définissent automatiquement
+# XIAOVV_MQTT_CONFIG vers ce fichier externe.
+# Le mot de passe reste dans une variable d'environnement, par exemple :
+#
+#     XIAOVV_MQTT_EXAMPLE_PASSWORD
+#
+

@@ -153,7 +153,7 @@ class RtspServer(
             for (stream in streams.values) {
 
                 log.info(
-                    "RTSP : rtsp://<IP>:{}/{}",
+                    "RTSP : rtsp://<IP_DU_SERVEUR>:{}/{}",
                     port,
                     stream.name
                 )
@@ -299,6 +299,15 @@ class RtspServer(
 
         @Volatile
         private var playing =
+            false
+
+        /**
+         * Vrai uniquement si cette session RTSP a acquis une
+         * consommation sur selectedStream. Cela évite de compter
+         * deux fois un PLAY répété et garantit une seule libération.
+         */
+        @Volatile
+        private var demandHeld =
             false
 
         @Volatile
@@ -844,6 +853,8 @@ class RtspServer(
                 )
             }
 
+            acquireDemand()
+
             log.info(
                 "RTSP PLAY /{} : {} (vidéo={}, audio={})",
                 stream.name,
@@ -851,6 +862,41 @@ class RtspServer(
                 videoSetupDone,
                 audioSetupDone
             )
+        }
+
+        private fun acquireDemand() {
+
+            if (demandHeld) {
+                return
+            }
+
+            val stream =
+                selectedStream
+                    ?: return
+
+            demandHeld =
+                true
+
+            stream.acquireConsumer()
+        }
+
+        private fun releaseDemand() {
+
+            if (!demandHeld) {
+                return
+            }
+
+            /*
+             * Capture la référence avant de remettre l'état à faux :
+             * bindStream() peut ensuite changer selectedStream.
+             */
+            val stream =
+                selectedStream
+
+            demandHeld =
+                false
+
+            stream?.releaseConsumer()
         }
 
         private fun bindStream(
@@ -897,6 +943,8 @@ class RtspServer(
         }
 
         private fun pauseStream() {
+
+            releaseDemand()
 
             playing =
                 false

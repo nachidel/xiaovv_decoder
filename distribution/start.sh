@@ -16,6 +16,17 @@ if [ -f "$SCRIPT_DIR/xiaovv-env.sh" ]; then
     . "$SCRIPT_DIR/xiaovv-env.sh"
 fi
 
+# ============================================================
+# CONFIGURATION MQTT EXTERNE
+# ============================================================
+#
+# Une valeur XIAOVV_MQTT_CONFIG déjà définie garde la priorité.
+#
+
+if [ -z "${XIAOVV_MQTT_CONFIG:-}" ]; then
+    export XIAOVV_MQTT_CONFIG="$SCRIPT_DIR/mqtt.properties"
+fi
+
 if ! command -v java >/dev/null 2>&1; then
     echo "ERREUR : Java est introuvable." >&2
     echo "Installe Java 21 ou une version compatible." >&2

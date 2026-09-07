@@ -29,6 +29,19 @@ if (Test-Path $envFile) {
 }
 
 # ============================================================
+# CONFIGURATION MQTT EXTERNE
+# ============================================================
+#
+# Par défaut, mqtt.properties reste à la racine de la distribution.
+# Une valeur XIAOVV_MQTT_CONFIG déjà définie garde la priorité.
+#
+
+if ([string]::IsNullOrWhiteSpace($env:XIAOVV_MQTT_CONFIG)) {
+    $env:XIAOVV_MQTT_CONFIG =
+        Join-Path $PSScriptRoot "mqtt.properties"
+}
+
+# ============================================================
 # CHEMINS
 # ============================================================
 

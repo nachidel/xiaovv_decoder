@@ -1,10 +1,9 @@
 package fr.nachidel.xiaovv
 
-import fr.nachidel.xiaovv.camera.CameraSupervisor
 import fr.nachidel.xiaovv.logging.logger
+import fr.nachidel.xiaovv.rtsp.RtspServer
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
-import fr.nachidel.xiaovv.rtsp.RtspServer
 
 private val log =
     logger<Main>()
@@ -57,33 +56,35 @@ fun main() {
      * ============================================================
      */
 
-    val supervisors =
-        mutableListOf<CameraSupervisor>()
-
-    for (
-    camera in
-    config.cameras
-    ) {
-
-        val stream =
-            rtspServer.createStream(
-                name =
-                    camera.streamName
-            )
-
-        val supervisor =
-            CameraSupervisor(
-                config =
-                    camera,
-
-                rtspStream =
-                    stream
-            )
-
-        supervisors.add(
-            supervisor
+    val cameraRuntime =
+        CameraRuntimeManager(
+            rtspServer =
+                rtspServer
         )
-    }
+
+    cameraRuntime.initialize(
+        config.cameras
+    )
+
+    /*
+     * ============================================================
+     * GOOGLE CAST
+     * ============================================================
+     */
+
+    val castManager =
+        CastManager(
+            rtspPort =
+                config.rtsp.port,
+
+            apiBindAddress =
+                config.api.bindAddress,
+
+            apiPort =
+                config.api.port
+        )
+
+    castManager.start()
 
     /*
      * ============================================================
@@ -93,8 +94,11 @@ fun main() {
 
     val apiServer =
         CameraApiServer(
-            supervisors =
-                supervisors,
+            cameraRuntime =
+                cameraRuntime,
+
+            castManager =
+                castManager,
 
             bindAddress =
                 config.api.bindAddress,
@@ -103,7 +107,14 @@ fun main() {
                 config.api.port,
 
             apiToken =
-                config.api.token
+                config.api.token,
+
+            /*
+             * Utilisé uniquement par le mur vidéo pour relire
+             * localement les flux servis par notre propre serveur RTSP.
+             */
+            rtspPort =
+                config.rtsp.port
         )
 
     /*
@@ -138,17 +149,18 @@ fun main() {
                     } catch (_: Exception) {
                     }
 
-                    for (
-                    supervisor in
-                    supervisors
-                    ) {
+                    try {
 
-                        try {
+                        castManager.close()
 
-                            supervisor.close()
+                    } catch (_: Exception) {
+                    }
 
-                        } catch (_: Exception) {
-                        }
+                    try {
+
+                        cameraRuntime.close()
+
+                    } catch (_: Exception) {
                     }
 
                     try {
@@ -192,13 +204,7 @@ fun main() {
      * ============================================================
      */
 
-    for (
-    supervisor in
-    supervisors
-    ) {
-
-        supervisor.start()
-    }
+    cameraRuntime.startAll()
 
     /*
      * ============================================================
@@ -210,7 +216,7 @@ fun main() {
 
     log.info(
         "{} caméra(s) configurée(s)",
-        supervisors.size
+        cameraRuntime.snapshot().size
     )
 
     if (
@@ -223,10 +229,21 @@ fun main() {
             config.api.port
         )
 
+        log.info(
+            "Mur vidéo LAN : http://<IP_DU_SERVEUR>:{}/live",
+            config.api.port
+        )
+
     } else {
 
         log.info(
             "Pilotage : http://{}:{}/",
+            config.api.bindAddress,
+            config.api.port
+        )
+
+        log.info(
+            "Mur vidéo : http://{}:{}/live",
             config.api.bindAddress,
             config.api.port
         )

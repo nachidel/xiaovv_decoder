@@ -21,6 +21,19 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 # ============================================================
+# CONFIGURATION MQTT EXTERNE
+# ============================================================
+#
+# Une valeur XIAOVV_MQTT_CONFIG déjà définie garde la priorité.
+# Le fichier reste à la racine de la distribution et n'est pas
+# embarqué dans lib/app.
+#
+
+if [ -z "${XIAOVV_MQTT_CONFIG:-}" ]; then
+    export XIAOVV_MQTT_CONFIG="$SCRIPT_DIR/mqtt.properties"
+fi
+
+# ============================================================
 # CHEMINS
 # ============================================================
 

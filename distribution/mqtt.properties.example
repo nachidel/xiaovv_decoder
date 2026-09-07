@@ -1,0 +1,37 @@
+# ============================================================
+# Xiaovv - Configuration MQTT
+# ============================================================
+#
+# Copie ce fichier sous :
+#
+#     mqtt.properties
+#
+# Le mot de passe MQTT NE DOIT PAS être écrit ici.
+# Il est lu depuis une variable d'environnement.
+#
+# Pour l'ID "example", la variable automatique est :
+#
+#     XIAOVV_MQTT_EXAMPLE_PASSWORD
+#
+# Tu peux aussi choisir un autre nom avec :
+#
+#     mqtt.example.password-env=XIAOVV_MQTT_PASSWORD
+#
+# ============================================================
+
+mqtt.ids=example
+
+mqtt.example.name=Broker MQTT exemple
+mqtt.example.host=192.168.1.10
+mqtt.example.port=1883
+mqtt.example.tls=false
+mqtt.example.enabled=true
+
+# Facultatif si le broker autorise les connexions anonymes.
+mqtt.example.username=utilisateur_mqtt
+
+# Nom de la variable d'environnement, PAS le mot de passe.
+mqtt.example.password-env=XIAOVV_MQTT_EXAMPLE_PASSWORD
+
+# Ne pas ajouter :
+# mqtt.example.password=...
