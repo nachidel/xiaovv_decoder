@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import fr.nachidel.xiaovv.camera.CameraSupervisor
 import fr.nachidel.xiaovv.logging.logger
+import fr.nachidel.xiaovv.v380.V380TalkbackManager
 import java.io.Closeable
 import java.net.InetSocketAddress
 import java.net.URLDecoder
@@ -54,6 +55,18 @@ class CameraApiServer(
      */
     private val mqttFeature =
         MqttFeature()
+
+    /*
+     * Interphone / push-to-talk V380.
+     *
+     * Le navigateur envoie du PCM16LE 8 kHz mono. Le manager se charge
+     * du handshake V380, de l'IMA ADPCM et du chiffrement des versions
+     * récentes de la caméra.
+     */
+    private val talkbackManager =
+        V380TalkbackManager(
+            cameraRuntime
+        )
 
     private val httpActionClient =
         HttpClient.newBuilder()
@@ -779,6 +792,20 @@ class CameraApiServer(
                 }
 
                 handleImage(
+                    exchange,
+                    camera,
+                    segments[4]
+                )
+
+                return
+            }
+
+            if (
+                segments.size == 5 &&
+                segments[3] == "talkback"
+            ) {
+
+                handleTalkback(
                     exchange,
                     camera,
                     segments[4]
@@ -2086,6 +2113,10 @@ class CameraApiServer(
                 castManager.stopCast(
                     cameraId
                 )
+
+                talkbackManager.stop(
+                    cameraId
+                )
             }
 
         return reload
@@ -2523,6 +2554,241 @@ class CameraApiServer(
         }
 
         return null
+    }
+
+    private fun handleTalkback(
+        exchange: HttpExchange,
+        camera: CameraSupervisor,
+        action: String
+    ) {
+
+        try {
+
+            when (
+                action.lowercase()
+            ) {
+
+                "start" -> {
+
+                    if (
+                        !exchange.requestMethod.equals(
+                            "POST",
+                            ignoreCase = true
+                        )
+                    ) {
+
+                        methodNotAllowed(
+                            exchange
+                        )
+
+                        return
+                    }
+
+                    val status =
+                        talkbackManager.start(
+                            camera.config.id
+                        )
+
+                    sendJson(
+                        exchange,
+                        200,
+                        talkbackStatusJson(
+                            camera.config.id,
+                            status
+                        )
+                    )
+                }
+
+                "chunk" -> {
+
+                    if (
+                        !exchange.requestMethod.equals(
+                            "POST",
+                            ignoreCase = true
+                        )
+                    ) {
+
+                        methodNotAllowed(
+                            exchange
+                        )
+
+                        return
+                    }
+
+                    val pcm =
+                        readBinaryBody(
+                            exchange,
+                            64 * 1024
+                        )
+
+                    val status =
+                        talkbackManager.offerPcm(
+                            camera.config.id,
+                            pcm
+                        )
+
+                    sendJson(
+                        exchange,
+                        200,
+                        talkbackStatusJson(
+                            camera.config.id,
+                            status
+                        )
+                    )
+                }
+
+                "stop" -> {
+
+                    if (
+                        !exchange.requestMethod.equals(
+                            "POST",
+                            ignoreCase = true
+                        )
+                    ) {
+
+                        methodNotAllowed(
+                            exchange
+                        )
+
+                        return
+                    }
+
+                    val status =
+                        talkbackManager.stop(
+                            camera.config.id
+                        )
+
+                    sendJson(
+                        exchange,
+                        200,
+                        talkbackStatusJson(
+                            camera.config.id,
+                            status
+                        )
+                    )
+                }
+
+                "status" -> {
+
+                    if (
+                        !isGet(
+                            exchange
+                        )
+                    ) {
+
+                        methodNotAllowed(
+                            exchange
+                        )
+
+                        return
+                    }
+
+                    val status =
+                        talkbackManager.status(
+                            camera.config.id
+                        )
+
+                    sendJson(
+                        exchange,
+                        200,
+                        talkbackStatusJson(
+                            camera.config.id,
+                            status
+                        )
+                    )
+                }
+
+                else -> {
+
+                    sendJson(
+                        exchange,
+                        404,
+                        jsonError(
+                            "Action interphone inconnue : $action"
+                        )
+                    )
+                }
+            }
+
+        } catch (e: Exception) {
+
+            log.warn(
+                "[{}] interphone impossible : {}",
+                camera.config.id,
+                e.message
+            )
+
+            sendJson(
+                exchange,
+                502,
+                jsonError(
+                    e.message
+                        ?: "Interphone impossible"
+                )
+            )
+        }
+    }
+
+    private fun talkbackStatusJson(
+        cameraId: String,
+        status: V380TalkbackManager.Status
+    ): String {
+
+        val protocol =
+            status.protocolVersion
+                ?.toString()
+                ?: "null"
+
+        return """
+        {
+          "success": true,
+          "camera": "${jsonEscape(cameraId)}",
+          "active": ${status.active},
+          "protocolVersion": $protocol,
+          "queuedChunks": ${status.queuedChunks}
+        }
+        """.trimIndent()
+    }
+
+    private fun readBinaryBody(
+        exchange: HttpExchange,
+        maxBytes: Int
+    ): ByteArray {
+
+        val declared =
+            exchange.requestHeaders
+                .getFirst(
+                    "Content-Length"
+                )
+                ?.toLongOrNull()
+
+        if (
+            declared != null &&
+            declared > maxBytes
+        ) {
+            error(
+                "Corps audio trop grand"
+            )
+        }
+
+        val bytes =
+            exchange.requestBody.use {
+                    input ->
+
+                input.readNBytes(
+                    maxBytes + 1
+                )
+            }
+
+        if (
+            bytes.size > maxBytes
+        ) {
+            error(
+                "Corps audio trop grand"
+            )
+        }
+
+        return bytes
     }
 
     private fun handlePtz(
@@ -5438,6 +5704,41 @@ body.wall-only .interface-toggle {
  * Il ne recouvre jamais la vidéo et n'altère pas la connexion MJPEG.
  * La taille enregistrée reste celle de la fenêtre vidéo elle-même.
  */
+.talkback-button {
+    width: 100%;
+    min-height: 44px;
+    border: 1px solid rgba(255,255,255,.18);
+    border-radius: 10px;
+    background: rgba(255,255,255,.08);
+    color: #fff;
+    font-weight: 700;
+    cursor: pointer;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.talkback-button:hover {
+    background: rgba(255,255,255,.14);
+}
+
+.talkback-button.active {
+    background: rgba(220,38,38,.88);
+    border-color: rgba(255,255,255,.35);
+    box-shadow: 0 0 0 2px rgba(220,38,38,.22);
+}
+
+.talkback-button.busy {
+    opacity: .68;
+}
+
+.talkback-hint {
+    margin-top: 7px;
+    color: #94a3b8;
+    font-size: 11px;
+    line-height: 1.35;
+}
+
 .tile-controls {
     display: none;
 
@@ -6768,6 +7069,761 @@ function makeTileCommandButton(
     return button;
 }
 
+let talkbackState =
+    null;
+
+let talkbackRequestSerial =
+    0;
+
+function talkbackSecureContextAvailable() {
+
+    return !!(
+        window.isSecureContext &&
+        navigator.mediaDevices &&
+        navigator.mediaDevices.getUserMedia
+    );
+}
+
+function concatInt16(
+    a,
+    b
+) {
+
+    const result =
+        new Int16Array(
+            a.length +
+            b.length
+        );
+
+    result.set(
+        a,
+        0
+    );
+
+    result.set(
+        b,
+        a.length
+    );
+
+    return result;
+}
+
+function floatToPcm8k(
+    samples,
+    sourceRate
+) {
+
+    const targetRate =
+        8000;
+
+    if (
+        sourceRate === targetRate
+    ) {
+
+        const direct =
+            new Int16Array(
+                samples.length
+            );
+
+        for (
+            let i = 0;
+            i < samples.length;
+            i++
+        ) {
+
+            const sample =
+                Math.max(
+                    -1,
+                    Math.min(
+                        1,
+                        samples[i]
+                    )
+                );
+
+            direct[i] =
+                sample < 0
+                    ? sample * 32768
+                    : sample * 32767;
+        }
+
+        return direct;
+    }
+
+    const ratio =
+        sourceRate /
+        targetRate;
+
+    const outputLength =
+        Math.max(
+            1,
+            Math.floor(
+                samples.length /
+                ratio
+            )
+        );
+
+    const result =
+        new Int16Array(
+            outputLength
+        );
+
+    for (
+        let i = 0;
+        i < outputLength;
+        i++
+    ) {
+
+        const position =
+            i *
+            ratio;
+
+        const leftIndex =
+            Math.floor(
+                position
+            );
+
+        const rightIndex =
+            Math.min(
+                samples.length - 1,
+                leftIndex + 1
+            );
+
+        const fraction =
+            position -
+            leftIndex;
+
+        const interpolated =
+            samples[leftIndex] *
+            (
+                1 -
+                fraction
+            ) +
+            samples[rightIndex] *
+            fraction;
+
+        const sample =
+            Math.max(
+                -1,
+                Math.min(
+                    1,
+                    interpolated
+                )
+            );
+
+        result[i] =
+            sample < 0
+                ? sample * 32768
+                : sample * 32767;
+    }
+
+    return result;
+}
+
+async function pumpTalkbackChunks(
+    state
+) {
+
+    if (
+        state.sending ||
+        !state.active
+    ) {
+        return;
+    }
+
+    state.sending =
+        true;
+
+    try {
+
+        while (
+            state.active &&
+            state.sendQueue.length > 0
+        ) {
+
+            const chunk =
+                state.sendQueue.shift();
+
+            const response =
+                await apiFetch(
+                    "/api/cameras/" +
+                    encodeURIComponent(
+                        state.cameraId
+                    ) +
+                    "/talkback/chunk",
+                    {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/octet-stream"
+                        },
+                        body: chunk
+                    }
+                );
+
+            if (
+                !response.ok
+            ) {
+
+                let message =
+                    "Envoi micro impossible";
+
+                try {
+
+                    const payload =
+                        await response.json();
+
+                    if (
+                        payload &&
+                        payload.error
+                    ) {
+                        message =
+                            payload.error;
+                    }
+
+                } catch (_) {
+                }
+
+                throw new Error(
+                    message
+                );
+            }
+        }
+
+    } catch (error) {
+
+        console.error(
+            error
+        );
+
+        if (
+            state.active
+        ) {
+
+            window.alert(
+                error && error.message
+                    ? error.message
+                    : "Interphone interrompu"
+            );
+
+            stopTalkback(
+                state.cameraId
+            );
+        }
+
+    } finally {
+
+        state.sending =
+            false;
+    }
+}
+
+function enqueueTalkbackPcm(
+    state,
+    pcm
+) {
+
+    if (
+        !state.active
+    ) {
+        return;
+    }
+
+    state.pendingPcm =
+        concatInt16(
+            state.pendingPcm,
+            pcm
+        );
+
+    const chunkSamples =
+        2000;
+
+    while (
+        state.pendingPcm.length >=
+        chunkSamples
+    ) {
+
+        const chunkSamplesView =
+            state.pendingPcm.slice(
+                0,
+                chunkSamples
+            );
+
+        state.pendingPcm =
+            state.pendingPcm.slice(
+                chunkSamples
+            );
+
+        const chunkBytes =
+            new Uint8Array(
+                chunkSamplesView.buffer
+            );
+
+        /*
+         * Si le réseau prend du retard, on préfère jeter un vieux bloc
+         * plutôt que faire parler la caméra plusieurs secondes trop tard.
+         */
+        if (
+            state.sendQueue.length >= 4
+        ) {
+            state.sendQueue.shift();
+        }
+
+        state.sendQueue.push(
+            chunkBytes
+        );
+    }
+
+    pumpTalkbackChunks(
+        state
+    );
+}
+
+async function startTalkback(
+    cameraId,
+    button
+) {
+
+    const serial =
+        ++talkbackRequestSerial;
+
+    if (
+        !talkbackSecureContextAvailable()
+    ) {
+
+        window.alert(
+            "Le navigateur bloque l'accès au microphone sur une page HTTP du LAN. " +
+            "Ouvre Xiaovv via https://... ou directement via http://localhost pour utiliser l'interphone."
+        );
+
+        return;
+    }
+
+    if (
+        talkbackState &&
+        talkbackState.active
+    ) {
+        await stopTalkback(
+            talkbackState.cameraId
+        );
+    }
+
+    button.classList.add(
+        "busy"
+    );
+
+    let stream =
+        null;
+
+    let serverStarted =
+        false;
+
+    try {
+
+        stream =
+            await navigator.mediaDevices.getUserMedia(
+                {
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true,
+                        channelCount: 1
+                    },
+                    video: false
+                }
+            );
+
+        if (
+            serial !== talkbackRequestSerial
+        ) {
+
+            stream.getTracks().forEach(
+                function(track) {
+                    track.stop();
+                }
+            );
+
+            return;
+        }
+
+        const startResponse =
+            await apiFetch(
+                "/api/cameras/" +
+                encodeURIComponent(
+                    cameraId
+                ) +
+                "/talkback/start",
+                {
+                    method: "POST"
+                }
+            );
+
+        let startPayload =
+            null;
+
+        try {
+            startPayload =
+                await startResponse.json();
+        } catch (_) {
+        }
+
+        if (
+            !startResponse.ok
+        ) {
+            throw new Error(
+                startPayload && startPayload.error
+                    ? startPayload.error
+                    : "La caméra refuse l'interphone"
+            );
+        }
+
+        serverStarted =
+            true;
+
+        if (
+            serial !== talkbackRequestSerial
+        ) {
+
+            await apiFetch(
+                "/api/cameras/" +
+                encodeURIComponent(
+                    cameraId
+                ) +
+                "/talkback/stop",
+                {
+                    method: "POST"
+                }
+            );
+
+            stream.getTracks().forEach(
+                function(track) {
+                    track.stop();
+                }
+            );
+
+            return;
+        }
+
+        const AudioContextClass =
+            window.AudioContext ||
+            window.webkitAudioContext;
+
+        const audioContext =
+            new AudioContextClass(
+                {
+                    sampleRate: 8000,
+                    latencyHint: "interactive"
+                }
+            );
+
+        const source =
+            audioContext.createMediaStreamSource(
+                stream
+            );
+
+        const processor =
+            audioContext.createScriptProcessor(
+                2048,
+                1,
+                1
+            );
+
+        const silentGain =
+            audioContext.createGain();
+
+        silentGain.gain.value =
+            0;
+
+        const state =
+            {
+                cameraId: cameraId,
+                button: button,
+                stream: stream,
+                audioContext: audioContext,
+                source: source,
+                processor: processor,
+                silentGain: silentGain,
+                pendingPcm: new Int16Array(0),
+                sendQueue: [],
+                sending: false,
+                active: true
+            };
+
+        processor.onaudioprocess =
+            function(event) {
+
+                if (
+                    !state.active
+                ) {
+                    return;
+                }
+
+                const input =
+                    event.inputBuffer.getChannelData(
+                        0
+                    );
+
+                const pcm =
+                    floatToPcm8k(
+                        input,
+                        audioContext.sampleRate
+                    );
+
+                enqueueTalkbackPcm(
+                    state,
+                    pcm
+                );
+            };
+
+        source.connect(
+            processor
+        );
+
+        processor.connect(
+            silentGain
+        );
+
+        silentGain.connect(
+            audioContext.destination
+        );
+
+        talkbackState =
+            state;
+
+        button.classList.remove(
+            "busy"
+        );
+
+        button.classList.add(
+            "active"
+        );
+
+        button.textContent =
+            "🎙 Parlez...";
+
+    } catch (error) {
+
+        if (
+            stream
+        ) {
+            stream.getTracks().forEach(
+                function(track) {
+                    track.stop();
+                }
+            );
+        }
+
+        if (
+            serverStarted
+        ) {
+
+            try {
+                await apiFetch(
+                    "/api/cameras/" +
+                    encodeURIComponent(
+                        cameraId
+                    ) +
+                    "/talkback/stop",
+                    {
+                        method: "POST"
+                    }
+                );
+            } catch (_) {
+            }
+        }
+
+        window.alert(
+            error && error.message
+                ? error.message
+                : "Impossible d'activer le microphone"
+        );
+
+    } finally {
+
+        if (
+            !talkbackState ||
+            talkbackState.cameraId !== cameraId
+        ) {
+            button.classList.remove(
+                "busy"
+            );
+        }
+    }
+}
+
+async function stopTalkback(
+    cameraId
+) {
+
+    ++talkbackRequestSerial;
+
+    const state =
+        talkbackState;
+
+    if (
+        state &&
+        state.cameraId === cameraId
+    ) {
+
+        state.active =
+            false;
+
+        state.sendQueue =
+            [];
+
+        state.pendingPcm =
+            new Int16Array(0);
+
+        try {
+            state.processor.disconnect();
+        } catch (_) {
+        }
+
+        try {
+            state.source.disconnect();
+        } catch (_) {
+        }
+
+        try {
+            state.silentGain.disconnect();
+        } catch (_) {
+        }
+
+        state.stream.getTracks().forEach(
+            function(track) {
+                track.stop();
+            }
+        );
+
+        try {
+            await state.audioContext.close();
+        } catch (_) {
+        }
+
+        state.button.classList.remove(
+            "active",
+            "busy"
+        );
+
+        state.button.textContent =
+            "🎙 Maintenir pour parler";
+
+        talkbackState =
+            null;
+    }
+
+    try {
+
+        await apiFetch(
+            "/api/cameras/" +
+            encodeURIComponent(
+                cameraId
+            ) +
+            "/talkback/stop",
+            {
+                method: "POST"
+            }
+        );
+
+    } catch (error) {
+
+        console.warn(
+            "Arrêt interphone :",
+            error
+        );
+    }
+}
+
+function makeTalkbackButton(
+    cameraId
+) {
+
+    const button =
+        document.createElement(
+            "button"
+        );
+
+    button.type =
+        "button";
+
+    button.className =
+        "talkback-button";
+
+    button.textContent =
+        "🎙 Maintenir pour parler";
+
+    button.title =
+        "Interphone V380 - push-to-talk";
+
+    button.addEventListener(
+        "contextmenu",
+        function(event) {
+            event.preventDefault();
+        }
+    );
+
+    button.addEventListener(
+        "pointerdown",
+        function(event) {
+
+            event.preventDefault();
+            event.stopPropagation();
+
+            try {
+                button.setPointerCapture(
+                    event.pointerId
+                );
+            } catch (_) {
+            }
+
+            startTalkback(
+                cameraId,
+                button
+            );
+        }
+    );
+
+    const stop =
+        function(event) {
+
+            if (
+                event
+            ) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+
+            stopTalkback(
+                cameraId
+            );
+        };
+
+    button.addEventListener(
+        "pointerup",
+        stop
+    );
+
+    button.addEventListener(
+        "pointercancel",
+        stop
+    );
+
+    button.addEventListener(
+        "lostpointercapture",
+        function() {
+
+            if (
+                talkbackState &&
+                talkbackState.cameraId === cameraId
+            ) {
+                stopTalkback(
+                    cameraId
+                );
+            }
+        }
+    );
+
+    return button;
+}
+
 function buildTileControls(
     camera
 ) {
@@ -7040,6 +8096,60 @@ function buildTileControls(
 
     layout.appendChild(
         imageSection
+    );
+
+    /*
+     * Interphone / push-to-talk
+     */
+    const talkSection =
+        document.createElement(
+            "div"
+        );
+
+    talkSection.className =
+        "tile-control-section";
+
+    const talkTitle =
+        document.createElement(
+            "div"
+        );
+
+    talkTitle.className =
+        "tile-control-title";
+
+    talkTitle.textContent =
+        "Interphone";
+
+    const talkButton =
+        makeTalkbackButton(
+            camera.id
+        );
+
+    const talkHint =
+        document.createElement(
+            "div"
+        );
+
+    talkHint.className =
+        "talkback-hint";
+
+    talkHint.textContent =
+        "Maintenir le bouton enfoncé. Micro navigateur : HTTPS ou localhost requis.";
+
+    talkSection.appendChild(
+        talkTitle
+    );
+
+    talkSection.appendChild(
+        talkButton
+    );
+
+    talkSection.appendChild(
+        talkHint
+    );
+
+    layout.appendChild(
+        talkSection
     );
 
     panel.appendChild(
@@ -11004,6 +12114,11 @@ setInterval(
 
         try {
             mqttFeature.close()
+        } catch (_: Exception) {
+        }
+
+        try {
+            talkbackManager.close()
         } catch (_: Exception) {
         }
 
