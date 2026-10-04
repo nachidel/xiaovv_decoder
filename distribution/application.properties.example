@@ -23,6 +23,18 @@ api.port=8080
 # NE PAS mettre le jeton réel ici.
 api.token-env=XIAOVV_API_TOKEN
 
+# HTTPS facultatif en parallèle du HTTP local (Google Cast).
+# Voir docs/HTTPS.md dans le dépôt.
+api.https.enabled=false
+# api.https.bind-address=0.0.0.0
+# api.https.port=8443
+# Chemin absolu recommandé ; utiliser / même sous Windows.
+# api.https.key-store=/chemin/vers/certs/xiaovv.p12
+# api.https.key-store-type=PKCS12
+# api.https.key-store-password-env=XIAOVV_HTTPS_KEY_STORE_PASSWORD
+# Sous Windows : saisie au premier lancement, puis stockage chiffre pour le compte courant.
+# api.https.key-store-password-file=certs/xiaovv-password.dpapi
+
 
 # ============================================================
 # CAMÉRA EXEMPLE
@@ -62,4 +74,3 @@ camera.example.reconnect-delay-ms=5000
 #
 #     XIAOVV_MQTT_EXAMPLE_PASSWORD
 #
-

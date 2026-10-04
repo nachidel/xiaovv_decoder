@@ -73,6 +73,9 @@ http://localhost:8080/
 Pour une autre machine ou un téléphone accédant à Xiaovv par son adresse LAN,
 prévoir HTTPS, par exemple avec un reverse proxy.
 
+L'écoute HTTPS native sur un port séparé est également disponible :
+voir [HTTPS](HTTPS.md).
+
 ## État de validation
 
 Le code est conçu pour le protocole V380 observé dans Xiaovv, notamment les

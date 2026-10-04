@@ -1,10 +1,21 @@
-package fr.nachidel.xiaovv
+package fr.nachidel.xiaovv.camera
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
-import fr.nachidel.xiaovv.camera.CameraSupervisor
+import fr.nachidel.xiaovv.ApiHttpsConfig
+import fr.nachidel.xiaovv.CameraConfigFileManager
+import fr.nachidel.xiaovv.CameraConfigUpdate
+import fr.nachidel.xiaovv.CameraRuntimeManager
+import fr.nachidel.xiaovv.CameraRuntimeReloadResult
+import fr.nachidel.xiaovv.CastManager
+import fr.nachidel.xiaovv.MqttDashboardUi
+import fr.nachidel.xiaovv.MqttFeature
+import fr.nachidel.xiaovv.WebAuthentication
+import fr.nachidel.xiaovv.DashboardForbidden
+import fr.nachidel.xiaovv.DashboardMissing
 import fr.nachidel.xiaovv.logging.logger
 import fr.nachidel.xiaovv.v380.V380TalkbackManager
+import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.net.InetSocketAddress
 import java.net.URLDecoder
@@ -16,6 +27,7 @@ import java.time.Duration
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class CameraApiServer(
@@ -24,7 +36,9 @@ class CameraApiServer(
     private val bindAddress: String,
     private val port: Int,
     private val apiToken: String,
-    private val rtspPort: Int
+    private val rtspPort: Int,
+    private val httpsConfig: ApiHttpsConfig? = null,
+    private val webAuthentication: WebAuthentication = WebAuthentication()
 ) : Closeable {
 
     private val log =
@@ -36,6 +50,8 @@ class CameraApiServer(
     private var server:
             HttpServer? =
         null
+
+    private var httpsServer: HttpServer? = null
 
     private val executor =
         Executors.newCachedThreadPool()
@@ -93,6 +109,18 @@ class CameraApiServer(
 
         try {
 
+            // Charger le certificat avant d'ouvrir l'accès HTTP : une erreur TLS
+            // doit interrompre le démarrage, sans laisser un serveur partiel.
+            httpsServer = httpsConfig?.createServer()
+
+            // Démarrer chaque listener dès sa configuration : HttpServer.stop()
+            // ne libère pas la socket d'un listener lié mais jamais démarré.
+            httpsServer?.let { listener ->
+                listener.createContext("/") { exchange -> handle(exchange) }
+                listener.executor = executor
+                listener.start()
+            }
+
             mqttFeature.start()
 
             val httpServer =
@@ -104,21 +132,10 @@ class CameraApiServer(
                     0
                 )
 
-            httpServer.createContext(
-                "/"
-            ) { exchange ->
+            server = httpServer
 
-                handle(
-                    exchange
-                )
-            }
-
-            httpServer.executor =
-                executor
-
-            server =
-                httpServer
-
+            httpServer.createContext("/") { exchange -> handle(exchange) }
+            httpServer.executor = executor
             httpServer.start()
 
             log.info(
@@ -127,11 +144,20 @@ class CameraApiServer(
                 port
             )
 
+            httpsConfig?.let { https ->
+                log.info("API caméras démarrée sur https://{}:{}", https.bindAddress, https.port)
+            }
+
             log.info(
                 "Authentification API activée"
             )
 
         } catch (e: Exception) {
+
+            server?.stop(0)
+            server = null
+            httpsServer?.stop(0)
+            httpsServer = null
 
             try {
                 mqttFeature.close()
@@ -178,7 +204,7 @@ class CameraApiServer(
 
             exchange.responseHeaders.set(
                 "Access-Control-Allow-Headers",
-                "Content-Type, X-API-Token, Authorization, Accept-Encoding, Range, Origin"
+                "Content-Type, X-API-Token, X-CSRF-Token, Authorization, Accept-Encoding, Range, Origin"
             )
 
             exchange.responseHeaders.set(
@@ -204,7 +230,10 @@ class CameraApiServer(
             val path =
                 exchange.requestURI
                     .path
+                    .replace(Regex("/+"), "/")
                     .trimEnd('/')
+
+            if (webAuthentication.handle(exchange, path) { isAuthorized(exchange) }) return
 
             if (
                 path.isEmpty()
@@ -273,9 +302,7 @@ class CameraApiServer(
                 path.startsWith(
                     "/api/"
                 ) &&
-                !isAuthorized(
-                    exchange
-                )
+                !isAuthorized(exchange) && !webAuthentication.hasSession(exchange)
             ) {
 
                 sendJson(
@@ -289,6 +316,20 @@ class CameraApiServer(
                     """.trimIndent()
                 )
 
+                return
+            }
+
+            val dashboardAction = Regex("^/api/dashboard/([a-f0-9-]{36})/execute$").matchEntire(path)
+            if (dashboardAction != null) {
+                if (exchange.requestMethod != "POST") { methodNotAllowed(exchange); return }
+                val account = webAuthentication.account(exchange)
+                if (account == null) { sendJson(exchange, 401, jsonError("Connexion nécessaire")); return }
+                try {
+                    val action = webAuthentication.dashboard.action(account, dashboardAction.groupValues[1])
+                    handleHttpAction(exchange, action.fields)
+                } catch (_: DashboardForbidden) { sendJson(exchange, 403, jsonError("Accès à cet élément non autorisé")) }
+                catch (_: DashboardMissing) { sendJson(exchange, 404, jsonError("Élément introuvable")) }
+                catch (e: IllegalArgumentException) { sendJson(exchange, 400, jsonError(e.message ?: "Bouton invalide")) }
                 return
             }
 
@@ -541,7 +582,7 @@ class CameraApiServer(
                 sendJson(
                     exchange,
                     200,
-                    buildCameraListJson()
+                    buildCameraListJson(exchange)
                 )
 
                 return
@@ -575,6 +616,11 @@ class CameraApiServer(
             val cameraId =
                 segments[2]
 
+            if (!canUseCamera(exchange, cameraId)) {
+                sendJson(exchange, 403, jsonError("Accès à cette caméra non autorisé"))
+                return
+            }
+
             val camera =
                 cameraRuntime.get(
                     cameraId
@@ -592,6 +638,14 @@ class CameraApiServer(
                     )
                 )
 
+                return
+            }
+
+            if (segments.size == 4 && segments[3] == "audio.mp3") {
+                if (!isGet(exchange)) { methodNotAllowed(exchange); return }
+                CameraAudioStream.stream(exchange, camera, rtspPort) {
+                    running.get() && canUseCamera(exchange, camera.config.id)
+                }
                 return
             }
 
@@ -1168,7 +1222,7 @@ class CameraApiServer(
                         )
 
                     val jpeg =
-                        java.io.ByteArrayOutputStream(
+                        ByteArrayOutputStream(
                             256 * 1024
                         )
 
@@ -1179,7 +1233,7 @@ class CameraApiServer(
                         -1
 
                     while (
-                        running.get()
+                        running.get() && canUseCamera(exchange, camera.config.id)
                     ) {
 
                         val read =
@@ -1188,7 +1242,7 @@ class CameraApiServer(
                             )
 
                         if (
-                            read < 0
+                            read < 0 || !canUseCamera(exchange, camera.config.id)
                         ) {
                             break
                         }
@@ -1314,7 +1368,7 @@ class CameraApiServer(
                     process.isAlive &&
                     !process.waitFor(
                         700,
-                        java.util.concurrent.TimeUnit.MILLISECONDS
+                        TimeUnit.MILLISECONDS
                     )
                 ) {
 
@@ -1481,7 +1535,7 @@ class CameraApiServer(
                         )
 
                     while (
-                        running.get()
+                        running.get() && canUseCamera(exchange, camera.config.id)
                     ) {
 
                         val read =
@@ -1490,7 +1544,7 @@ class CameraApiServer(
                             )
 
                         if (
-                            read < 0
+                            read < 0 || !canUseCamera(exchange, camera.config.id)
                         ) {
                             break
                         }
@@ -1532,7 +1586,7 @@ class CameraApiServer(
                     process.isAlive &&
                     !process.waitFor(
                         700,
-                        java.util.concurrent.TimeUnit.MILLISECONDS
+                        TimeUnit.MILLISECONDS
                     )
                 ) {
 
@@ -1603,6 +1657,7 @@ class CameraApiServer(
 
         val sessions =
             castManager.activeSessions()
+                .filter { canUseCamera(exchange, it.cameraId) }
 
         val json =
             sessions.joinToString(
@@ -1644,6 +1699,11 @@ class CameraApiServer(
                     body,
                     "cameraId"
                 )
+
+            if (!canUseCamera(exchange, cameraId)) {
+                sendJson(exchange, 403, jsonError("Accès à cette caméra non autorisé"))
+                return
+            }
 
             val deviceAddress =
                 requiredFormParameter(
@@ -1718,6 +1778,11 @@ class CameraApiServer(
                     body,
                     "cameraId"
                 )
+
+            if (!canUseCamera(exchange, cameraId)) {
+                sendJson(exchange, 403, jsonError("Accès à cette caméra non autorisé"))
+                return
+            }
 
             val stopped =
                 castManager.stopCast(
@@ -2239,7 +2304,8 @@ class CameraApiServer(
      * une clé API Jeedom ou un autre secret dans sa query string.
      */
     private fun handleHttpAction(
-        exchange: HttpExchange
+        exchange: HttpExchange,
+        configuration: Map<String, String>? = null
     ) {
 
         val contentLength =
@@ -2251,7 +2317,7 @@ class CameraApiServer(
 
         if (
             contentLength != null &&
-            contentLength > 16_384L
+            contentLength > 16_384L && configuration == null
         ) {
 
             sendJson(
@@ -2266,7 +2332,7 @@ class CameraApiServer(
         }
 
         val bodyBytes =
-            exchange.requestBody.use {
+            if (configuration != null) ByteArray(0) else exchange.requestBody.use {
                     input ->
 
                 input.readNBytes(
@@ -2296,7 +2362,7 @@ class CameraApiServer(
             )
 
         val method =
-            formParameter(
+            configuration?.get("method") ?: formParameter(
                 body,
                 "method"
             )
@@ -2305,7 +2371,7 @@ class CameraApiServer(
                 ?: ""
 
         val targetUrl =
-            formParameter(
+            configuration?.get("url") ?: formParameter(
                 body,
                 "url"
             )
@@ -3032,11 +3098,15 @@ class CameraApiServer(
         )
     }
 
-    private fun buildCameraListJson():
+    private fun canUseCamera(exchange: HttpExchange, cameraId: String) =
+        isAuthorized(exchange) || webAuthentication.canUseCamera(exchange, cameraId)
+
+    private fun buildCameraListJson(exchange: HttpExchange):
             String {
 
         return cameraRuntime
             .snapshot()
+            .filter { canUseCamera(exchange, it.config.id) }
             .joinToString(
                 prefix = "[",
                 postfix = "]",
@@ -3093,6 +3163,11 @@ class CameraApiServer(
 <head>
 
 <meta charset="UTF-8">
+<link rel="icon" href="/favicon.webp" type="image/webp">
+<link rel="stylesheet" href="/auth.css">
+<script src="/auth.js"></script>
+<script src="/dashboard.js"></script>
+<script src="/camera-audio.js"></script>
 
 <meta
     name="viewport"
@@ -3486,10 +3561,11 @@ h1 {
         </button>
 
         <button
+            id="token-button"
             class="token-button"
             onclick="changeToken()"
         >
-            Jeton API
+            Mon compte
         </button>
 
     </div>
@@ -3703,79 +3779,13 @@ function commandErrorMessage(
     };
 }
 
-function getToken() {
-
-    let token =
-        localStorage.getItem(
-            "xiaovvApiToken"
-        );
-
-    if (!token) {
-
-        token =
-            window.prompt(
-                "Jeton API Xiaovv :"
-            ) || "";
-
-        if (token) {
-
-            localStorage.setItem(
-                "xiaovvApiToken",
-                token
-            );
-        }
-    }
-
-    return token;
-}
 
 function changeToken() {
-
-    localStorage.removeItem(
-        "xiaovvApiToken"
-    );
-
-    getToken();
-
-    refresh();
+    window.xiaovvAuth.openAccount();
 }
 
-async function apiFetch(
-    url,
-    options
-) {
-
-    options =
-        options || {};
-
-    options.headers =
-        options.headers || {};
-
-    options.headers[
-        "X-API-Token"
-    ] =
-        getToken();
-
-    const response =
-        await fetch(
-            url,
-            options
-        );
-
-    if (
-        response.status === 401
-    ) {
-
-        localStorage.removeItem(
-            "xiaovvApiToken"
-        );
-
-        throw new Error(
-            "Jeton API invalide"
-        );
-    }
-
-    return response;
+async function apiFetch(url, options) {
+    return window.xiaovvAuth.fetch(url, options);
 }
 
 async function command(
@@ -4557,6 +4567,11 @@ setInterval(
 <head>
 
 <meta charset="UTF-8">
+<link rel="icon" href="/favicon.webp" type="image/webp">
+<link rel="stylesheet" href="/auth.css">
+<script src="/auth.js"></script>
+<script src="/dashboard.js"></script>
+<script src="/camera-audio.js"></script>
 
 <meta
     name="viewport"
@@ -6043,7 +6058,7 @@ body.wall-only .interface-toggle {
             class="button"
             type="button"
         >
-            Jeton API
+            Mon compte
         </button>
 
     </div>
@@ -6675,108 +6690,13 @@ let cameraConfigSnapshot =
 let editingCameraId =
     null;
 
-function getToken() {
-
-    let token =
-        localStorage.getItem(
-            "xiaovvApiToken"
-        );
-
-    if (!token) {
-
-        token =
-            window.prompt(
-                "Jeton API Xiaovv :"
-            ) || "";
-
-        if (token) {
-
-            localStorage.setItem(
-                "xiaovvApiToken",
-                token
-            );
-        }
-    }
-
-    return token;
-}
 
 function changeToken() {
-
-    localStorage.removeItem(
-        "xiaovvApiToken"
-    );
-
-    getToken();
-
-    const wall =
-        document.getElementById(
-            "wall"
-        );
-
-    if (wall) {
-
-        wall.querySelectorAll(
-            ".player img"
-        ).forEach(
-            function(image) {
-
-                image.removeAttribute(
-                    "src"
-                );
-
-                image.src =
-                    "";
-            }
-        );
-
-        wall.innerHTML =
-            "";
-    }
-
-    refreshCameras(
-        true
-    );
+    window.xiaovvAuth.openAccount();
 }
 
-async function apiFetch(
-    url,
-    options
-) {
-
-    options =
-        options ||
-        {};
-
-    options.headers =
-        options.headers ||
-        {};
-
-    options.headers[
-        "X-API-Token"
-    ] =
-        getToken();
-
-    const response =
-        await fetch(
-            url,
-            options
-        );
-
-    if (
-        response.status === 401
-    ) {
-
-        localStorage.removeItem(
-            "xiaovvApiToken"
-        );
-
-        throw new Error(
-            "Jeton API invalide"
-        );
-    }
-
-    return response;
+async function apiFetch(url, options) {
+    return window.xiaovvAuth.fetch(url, options);
 }
 
 
@@ -7108,13 +7028,13 @@ function concatInt16(
     return result;
 }
 
-function floatToPcm8k(
+function floatToPcm16k(
     samples,
     sourceRate
 ) {
 
     const targetRate =
-        8000;
+        16000;
 
     if (
         sourceRate === targetRate
@@ -7509,7 +7429,7 @@ async function startTalkback(
         const audioContext =
             new AudioContextClass(
                 {
-                    sampleRate: 8000,
+                    sampleRate: 16000,
                     latencyHint: "interactive"
                 }
             );
@@ -7562,7 +7482,7 @@ async function startTalkback(
                     );
 
                 const pcm =
-                    floatToPcm8k(
+                    floatToPcm16k(
                         input,
                         audioContext.sampleRate
                     );
@@ -8399,10 +8319,7 @@ function liveStreamUrl(
 
     return "/api/cameras/" +
         encodeURIComponent(cameraId) +
-        "/live.mjpeg?token=" +
-        encodeURIComponent(
-            getToken()
-        );
+        "/live.mjpeg";
 }
 
 function castIconSvg() {
@@ -9954,6 +9871,8 @@ async function executeAction(
     action,
     button
 ) {
+    if (window.xiaovvDashboard?.active) { await window.xiaovvDashboard.execute(action, button); return; }
+
 
     if (
         !action ||
@@ -10178,7 +10097,7 @@ function createActionTile(
         action.name;
 
     trigger.title =
-        action.url;
+        action.url || action.name;
 
     trigger.addEventListener(
         "click",
@@ -10250,6 +10169,8 @@ function renderActionTiles() {
 function openActionModal(
     editId
 ) {
+    if (window.xiaovvDashboard?.active) { window.xiaovvDashboard.open("action"); return; }
+
 
     editingActionId =
         editId ||
@@ -10322,6 +10243,8 @@ function openActionModal(
 function openActionEditor(
     id
 ) {
+    if (window.xiaovvDashboard?.active) { window.xiaovvDashboard.open("action", id); return; }
+
 
     openActionModal(
         id
@@ -11853,33 +11776,10 @@ document.getElementById(
  */
 ${MqttDashboardUi.javascript()}
 
-selected =
-    loadArray(
-        STORAGE_SELECTED
-    );
-
-order =
-    loadArray(
-        STORAGE_ORDER
-    );
-
-sizes =
-    loadObject(
-        STORAGE_SIZES
-    );
-
-loadActionTiles();
-renderActionTiles();
-
-setWallOnly(
-    localStorage.getItem(
-        STORAGE_WALL_ONLY
-    ) === "1"
-);
-
-refreshCameras(
-    true
-);
+window.xiaovvDashboard.start().then(() => {
+    refreshCameras(true);
+    refreshCastStatus();
+}).catch(error => showToast("Tableau de bord", error.message, "error"));
 
 refreshCastStatus();
 
@@ -12111,6 +12011,9 @@ setInterval(
 
         server =
             null
+
+        httpsServer?.stop(1)
+        httpsServer = null
 
         try {
             mqttFeature.close()

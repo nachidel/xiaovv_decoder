@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connexion — Xiaovv</title>
+  <link rel="icon" href="/favicon.webp" type="image/webp">
+  <link rel="stylesheet" href="/auth.css">
+  <script src="/auth.js" defer></script>
+</head>
+<body class="auth-page">
+  <main class="auth-card">
+    <img src="/favicon.webp" class="auth-logo" alt="Xiaovv" width="64" height="64">
+    <p class="auth-eyebrow">XIAOVV</p>
+    <h1 id="login-title">Connexion</h1>
+    <p id="login-description" class="auth-muted">Connectez-vous pour accéder à vos caméras.</p>
+    <form id="login-form">
+      <label for="login-username">Nom d'utilisateur</label>
+      <input id="login-username" name="username" autocomplete="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_.-]{2,31}" autofocus>
+      <label for="login-password">Mot de passe</label>
+      <input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="128">
+      <div id="setup-fields" hidden>
+        <label for="login-confirm">Confirmer le mot de passe</label>
+        <input id="login-confirm" type="password" autocomplete="new-password" maxlength="128">
+        <p class="auth-muted">Choisissez un mot de passe d'au moins 12 caractères.</p>
+        <label for="setup-token">Jeton API actuel</label>
+        <input id="setup-token" type="password" autocomplete="off">
+        <p class="auth-muted">Ce jeton autorise la création du premier administrateur. Il est repris automatiquement si ce navigateur l'a déjà enregistré.</p>
+      </div>
+      <p id="login-message" class="auth-message" role="status" aria-live="polite"></p>
+      <button id="login-submit" class="auth-primary" type="submit" disabled>Se connecter</button>
+    </form>
+  </main>
+</body>
+</html>

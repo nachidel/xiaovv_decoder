@@ -423,6 +423,7 @@
     }
 
     function saveInfoTiles() {
+        if (window.xiaovvDashboard?.active) { window.xiaovvDashboard.saveVisibility(); return; }
         localStorage.setItem(STORAGE_INFO_TILES, JSON.stringify(infoTiles));
     }
 
@@ -445,6 +446,7 @@
     }
 
     function saveControlOrder() {
+        if (window.xiaovvDashboard?.active) { window.xiaovvDashboard.saveLayout(); return; }
         localStorage.setItem(
             STORAGE_CONTROL_ORDER,
             JSON.stringify(controlOrder)
@@ -917,6 +919,7 @@
     }
 
     async function openInfoModal(editId) {
+        if (window.xiaovvDashboard?.active) { window.xiaovvDashboard.open("info", editId); return; }
         editingInfoId = editId || null;
         const info = editingInfoId ? infoById(editingInfoId) : null;
 
@@ -1348,8 +1351,14 @@
     /*
      * Important : chargé avant le refreshCameras(true) du code existant.
      */
-    loadInfoTiles();
-    loadControlOrder();
+    if (!window.xiaovvDashboard) { loadInfoTiles(); loadControlOrder(); }
+    window.xiaovvMqttBridge = {
+        getInfos: () => infoTiles,
+        setInfos: items => { infoTiles = items; },
+        getOrder: () => controlOrder,
+        setOrder: order => { controlOrder = order; },
+        refresh: refreshAllInfoTiles
+    };
 
     setInterval(
         refreshAllInfoTiles,

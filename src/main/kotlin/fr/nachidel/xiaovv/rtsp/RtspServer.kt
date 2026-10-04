@@ -24,7 +24,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class RtspServer(
     private val bindAddress: String = "0.0.0.0",
-    private val port: Int = 8555
+    private val port: Int = 8555,
+    private val authentication: RtspAuthentication? = null,
+    private val trustLoopback: Boolean = true
 ) : Closeable {
 
     private val log =
@@ -44,12 +46,17 @@ class RtspServer(
     private val streams =
         ConcurrentHashMap<String, RtspStream>()
 
+    private val cameraIds = ConcurrentHashMap<String, String>()
+
+    internal val listeningPort: Int get() = serverSocket?.localPort ?: port
+
     private val clients =
         CopyOnWriteArrayList<ClientSession>()
 
     fun createStream(
         name: String,
-        fps: Int = 20
+        fps: Int = 20,
+        cameraId: String = name
     ): RtspStream {
 
         require(
@@ -78,6 +85,8 @@ class RtspServer(
             "Le stream RTSP '$name' existe déjà"
         }
 
+        cameraIds[name] = cameraId
+
         log.info(
             "Stream RTSP enregistré : /{}",
             name
@@ -102,6 +111,7 @@ class RtspServer(
             )
                 ?: return
 
+        cameraIds.remove(name)
         stream.close()
 
         log.info(
@@ -265,6 +275,38 @@ class RtspServer(
         private val socket: Socket
     ) : Closeable {
 
+        @Volatile private var authenticated: RtspAuthentication.Session? = null
+        private val localClient = trustLoopback && socket.inetAddress.isLoopbackAddress
+
+        private fun canUseStream(stream: RtspStream): Boolean {
+            val auth = authentication ?: return true
+            if (localClient) return true
+            val session = authenticated ?: return false
+            return auth.canUseCamera(session, cameraIds[stream.name] ?: return false)
+        }
+
+        private fun authorize(request: RtspRequest, cseq: String): Boolean {
+            val auth = authentication ?: return true
+            if (localClient || request.method.equals("OPTIONS", true)) return true
+            val header = request.headers["Authorization"]
+            val current = authenticated
+            if (current == null || !auth.isCurrent(current) || (header != null && !auth.matches(current, header))) {
+                authenticated = auth.authenticate(header, socket.inetAddress.hostAddress)
+            }
+            if (authenticated == null) {
+                sendResponse(cseq, 401, "Unauthorized", mapOf("WWW-Authenticate" to "Basic realm=\"Xiaovv\", charset=\"UTF-8\""))
+                return false
+            }
+            val requested = resolveStream(request.uri)
+            val selected = selectedStream
+            if ((requested != null && !canUseStream(requested)) ||
+                (request.method.equals("PLAY", true) && selected != null && !canUseStream(selected))) {
+                sendResponse(cseq, 403, "Forbidden")
+                return false
+            }
+            return true
+        }
+
         private val active =
             AtomicBoolean(true)
 
@@ -420,7 +462,7 @@ class RtspServer(
                     log.debug(
                         "RTSP {} {}",
                         request.method,
-                        request.uri
+                        request.uri.replace(Regex("(?<=://)[^/]*@"), "<credentials>@")
                     )
 
                     if (
@@ -460,6 +502,8 @@ class RtspServer(
             val cseq =
                 request.headers["CSeq"]
                     ?: "0"
+
+            if (!authorize(request, cseq)) return true
 
             return when (
                 request.method.uppercase()
@@ -1090,6 +1134,8 @@ class RtspServer(
                     running.get()
                 ) {
 
+                    selectedStream?.let { if (!canUseStream(it)) { close(); return } }
+
                     val media =
                         mediaQueue.poll(
                             1,
@@ -1396,7 +1442,7 @@ class RtspServer(
                 if (parts.size != 3) {
 
                     throw SocketException(
-                        "Ligne RTSP invalide : $requestLine"
+                        "Ligne RTSP invalide"
                     )
                 }
 

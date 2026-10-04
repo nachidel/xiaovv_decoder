@@ -25,6 +25,11 @@ out/
 
 **/application.properties
 !**/application.properties.example
+**/mqtt.properties
+!**/mqtt.properties.example
+
+# Les sauvegardes peuvent également contenir les anciens mots de passe.
+*.bak
 
 **/xiaovv-env.bat
 **/xiaovv-env.ps1
@@ -35,6 +40,18 @@ out/
 !**/xiaovv-env.example.sh
 
 local.properties
+
+# Certificats contenant une clé privée.
+*.p12
+*.pfx
+*.jks
+*.key
+*.dpapi
+privkey*.pem
+id_rsa
+id_ed25519
+id_ecdsa
+id_dsa
 
 # ============================================================
 # Logs
@@ -59,3 +76,5 @@ captures/
 Thumbs.db
 desktop.ini
 /config/
+**/users.properties
+**/dashboard.properties

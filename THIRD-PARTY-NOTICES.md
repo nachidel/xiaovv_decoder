@@ -36,6 +36,13 @@ contains notices/licenses for:
 
 See `THIRD-PARTY-LICENSES/COMPONENTS.md` for the detailed mapping.
 
+## Xiaovv favicon
+
+`src/main/resources/favicon.webp` is the unchanged favicon served by the
+official Xiaovv website, https://www.xiaovv.net/ (retrieved 2026-10-04).
+The Xiaovv mark remains the property of its owner; the project's software
+license does not grant rights to that mark.
+
 ## Native Java runtime
 
 The Windows and Linux `jpackage` distributions contain a Java runtime.

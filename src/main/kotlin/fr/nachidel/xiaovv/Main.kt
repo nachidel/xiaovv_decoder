@@ -1,7 +1,9 @@
 package fr.nachidel.xiaovv
 
+import fr.nachidel.xiaovv.camera.CameraApiServer
 import fr.nachidel.xiaovv.logging.logger
 import fr.nachidel.xiaovv.rtsp.RtspServer
+import fr.nachidel.xiaovv.rtsp.RtspAuthentication
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -27,6 +29,8 @@ fun main() {
     val config =
         AppConfig.load()
 
+    val users = UserStore()
+
     val stopping =
         AtomicBoolean(false)
 
@@ -47,7 +51,8 @@ fun main() {
                 config.rtsp.bindAddress,
 
             port =
-                config.rtsp.port
+                config.rtsp.port,
+            authentication = RtspAuthentication(users)
         )
 
     /*
@@ -114,7 +119,11 @@ fun main() {
              * localement les flux servis par notre propre serveur RTSP.
              */
             rtspPort =
-                config.rtsp.port
+                config.rtsp.port,
+
+            httpsConfig =
+                config.api.https,
+            webAuthentication = WebAuthentication(users)
         )
 
     /*
@@ -212,7 +221,21 @@ fun main() {
      * ============================================================
      */
 
-    apiServer.start()
+    try {
+        apiServer.start()
+    } catch (e: Exception) {
+        // Un certificat invalide ne doit pas laisser RTSP, Cast ou les
+        // caméras fonctionner dans un processus démarré partiellement.
+        for (component in listOf(apiServer, cameraRuntime, rtspServer, castManager)) {
+            runCatching { component.close() }.onFailure { e.addSuppressed(it) }
+        }
+        throw e
+    }
+
+    config.api.https?.let { https ->
+        log.info("Pilotage HTTPS : https://<NOM_DU_DOMAINE>:{}/", https.port)
+        log.info("Mur vidéo HTTPS : https://<NOM_DU_DOMAINE>:{}/live", https.port)
+    }
 
     log.info(
         "{} caméra(s) configurée(s)",

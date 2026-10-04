@@ -37,6 +37,16 @@ class MqttFeature : Closeable {
         path: String
     ): Boolean {
         when {
+            path == "/api/mqtt/sources" -> {
+                if (exchange.requestMethod != "GET") methodNotAllowed(exchange)
+                else {
+                    val brokers = config.snapshot().brokers.filter { it.enabled }.joinToString(",", "[", "]") {
+                        """{"id":"${jsonEscape(it.id)}","name":"${jsonEscape(it.name)}","enabled":true}"""
+                    }
+                    sendJson(exchange, 200, """{"success":true,"brokers":$brokers}""")
+                }
+                return true
+            }
             path ==
             "/api/mqtt/servers" -> {
                 if (

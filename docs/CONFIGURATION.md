@@ -69,6 +69,10 @@ Pour le dashboard accessible depuis le LAN et pour Google Cast :
 api.bind-address=0.0.0.0
 ```
 
+Pour ajouter une écoute HTTPS sur un port séparé, voir [HTTPS](HTTPS.md).
+Les propriétés `api.https.*` sont facultatives et ne modifient pas l'écoute
+HTTP existante. Le certificat et son mot de passe sont externes.
+
 ## 4. Caméras
 
 Format :
@@ -129,6 +133,11 @@ camera.garage.password-env=MON_SECRET_CAMERA
 ## 6. Configuration MQTT
 
 La configuration MQTT est volontairement séparée dans `mqtt.properties`.
+
+Ce fichier est local et exclu de Git, comme sa sauvegarde `.bak`. Pour un
+nouveau clone, copier `distribution/mqtt.properties.example` vers
+`src/main/resources/mqtt.properties`, adapter le broker et fournir son mot de
+passe par la variable d'environnement indiquée dans le modèle.
 
 Emplacement, par ordre de priorité :
 
@@ -211,3 +220,8 @@ XIAOVV_MQTT_CONFIG=D:\xiaovv\mqtt.properties
 ```
 
 Ne pas mettre les valeurs réelles des secrets dans la documentation ou dans Git.
+
+Pour activer HTTPS directement avec **Run** sous Windows, ajoute les propriétés
+`api.https.*` dans la configuration utilisée, dont
+`api.https.key-store-password-file` pour la saisie initiale et la mémorisation
+chiffrée du mot de passe du certificat. Voir [démarrage HTTPS](HTTPS.md#démarrer-avec-run-dans-intellij-sur-windows).

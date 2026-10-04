@@ -222,6 +222,15 @@ data class AppConfig(
                 "Port API invalide : ${api.port}"
             }
 
+            val https = ApiHttpsConfig.load(
+                properties = properties,
+                configDirectory = externalConfig?.let { File(it).absoluteFile.parentFile }
+                    ?: File(".").absoluteFile,
+                httpBindAddress = api.bindAddress,
+                httpPort = api.port
+            )
+            val configuredApi = api.copy(https = https)
+
             /*
              * ====================================================
              * CAMÉRAS
@@ -358,7 +367,7 @@ data class AppConfig(
                     rtsp,
 
                 api =
-                    api,
+                    configuredApi,
 
                 cameras =
                     cameras
@@ -709,7 +718,8 @@ data class RtspConfig(
 data class ApiConfig(
     val bindAddress: String,
     val port: Int,
-    val token: String
+    val token: String,
+    val https: ApiHttpsConfig? = null
 )
 
 /*

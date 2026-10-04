@@ -23,7 +23,7 @@ import javax.crypto.spec.SecretKeySpec
  * de la caméra, on effectue un LOGIN afin de récupérer le handle, puis on
  * envoie le handshake et les paquets audio "speak" attendus par le firmware.
  *
- * Entrée attendue depuis l'API HTTP : PCM 16 bits little-endian, mono, 8 kHz.
+ * Entrée attendue depuis l'API HTTP : PCM 16 bits little-endian, mono, 16 kHz (profil observé dans la capture V380 du 09/09/2026).
  */
 class V380TalkbackManager(
     private val cameraRuntime: CameraRuntimeManager
@@ -319,6 +319,12 @@ class V380TalkbackManager(
 
                 lastAudioActivityNanos =
                     System.nanoTime()
+
+                // Marqueur observé avant le premier paquet audio dans V380.
+                audioOutput!!.apply {
+                    write(ByteArray(16).apply { this[0] = 0xBC.toByte() })
+                    flush()
+                }
 
                 workerThread =
                     Thread(
@@ -616,6 +622,9 @@ class V380TalkbackManager(
             var paceOriginNs =
                 0L
 
+            var pacePacketIndex =
+                0L
+
             var lastPacketSentNs =
                 0L
 
@@ -732,13 +741,13 @@ class V380TalkbackManager(
                             paceOriginNs =
                                 nowNs
 
-                            packetIndex =
+                            pacePacketIndex =
                                 0L
                         }
 
                         val targetNs =
                             paceOriginNs +
-                            packetIndex *
+                            pacePacketIndex *
                             AUDIO_PACKET_DURATION_NS
 
                         val waitNs =
@@ -768,6 +777,7 @@ class V380TalkbackManager(
                             System.nanoTime()
 
                         packetIndex++
+                        pacePacketIndex++
                     }
                 }
 
@@ -900,8 +910,8 @@ class V380TalkbackManager(
 
             val header =
                 byteArrayOf(
-                    0xB4.toByte(),
-                    0x00,
+                    0xF5.toByte(),
+                    0x03,
                     0x00,
                     0x00,
                     0x01,
@@ -917,6 +927,13 @@ class V380TalkbackManager(
                     0x01,
                     0x00
                 )
+
+            // La capture chiffrée utilise 0x03F5, pas la commande 0x00B4.
+            // Garder la commande historique pour les sessions sans chiffrement.
+            if (cipher == null) {
+                header[0] = 0xB4.toByte()
+                header[1] = 0x00
+            }
 
             header[15] =
                 (
@@ -1024,13 +1041,13 @@ class V380TalkbackManager(
                 )
 
             /*
-             * Le premier sample est stocké non compressé dans le header,
-             * après avoir mis à jour l'état IMA comme l'implémentation V380
-             * observée.
+             * Le décodeur initialise son prédicteur avec le premier sample
+             * non compressé du header. L'encodeur doit repartir de cette
+             * même valeur avant de produire le premier nibble ADPCM.
+             * L'index de pas est conservé et transmis dans le header.
              */
-            encodeSample(
+            predicted =
                 firstSample
-            )
 
             output[0] =
                 (firstSample and 0xFF)
@@ -1239,7 +1256,7 @@ class V380TalkbackManager(
             5_000L
 
         private const val PCM_SAMPLE_RATE =
-            8_000
+            16_000
 
         private const val PCM_SAMPLES_PER_BLOCK =
             505

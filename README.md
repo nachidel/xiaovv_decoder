@@ -40,7 +40,10 @@ rtsp://IP_DU_SERVEUR:8555/<stream-name>
 ### Interface Web
 
 - dashboard sur `/` et `/live` ;
+- favicon Xiaovv et page de connexion ;
+- comptes administrateur/utilisateur avec droits par caméra ;
 - mur vidéo MJPEG ;
+- écoute de la caméra sélectionnée, avec volume et coupure du son ;
 - sélection, ordre et redimensionnement des caméras ;
 - contrôles caméra sous les vidéos ;
 - snapshots ;
@@ -49,7 +52,14 @@ rtsp://IP_DU_SERVEUR:8555/<stream-name>
 - édition de la configuration des caméras ;
 - configuration globale des brokers MQTT ;
 - bouton Google Cast dans chaque vidéo ;
-- sauvegarde de la disposition du dashboard dans `localStorage`.
+- boutons et infos communs ou personnels, copiables et transférables entre comptes ;
+- sauvegarde de la disposition et du volume sur le serveur, par compte.
+
+La première ouverture crée l'administrateur avec le jeton API actuel. Ensuite,
+le bouton **Utilisateurs** permet de créer les comptes et de cocher leurs caméras
+autorisées. Un administrateur a accès à toutes les caméras. Les identifiants
+de ces comptes servent également aux lecteurs RTSP du LAN ; FFmpeg et Cast
+continuent de relire les flux localement. Voir [l'interface Web](docs/WEB-UI.md).
 
 ### Configuration à chaud
 
@@ -107,6 +117,7 @@ Le cœur RTSP n’a pas besoin de FFmpeg.
 
 - mur vidéo MJPEG ;
 - certaines routes vidéo HTTP ;
+- écoute Web du microphone (encodage MP3 avec `libmp3lame`) ;
 - snapshots ;
 - Google Cast.
 
@@ -190,13 +201,38 @@ XIAOVV_MQTT_<ID>_PASSWORD
 
 Voir [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
+## Déploiement Raspberry Pi
+
+Les variables et les tâches sont dans la section `DEPLOIEMENT RASPBERRY PI`
+de `build.gradle.kts`. Modifier `rpiHost` pour choisir le Pi, ou lancer :
+
+```powershell
+.\gradlew.bat deploiement -Prpi.host=192.168.1.15
+```
+
+La tâche package et teste le programme, vérifie SSH/sudo, installe Java 21,
+le certificat et ses mots de passe, transfère le programme puis démarre le
+service systemd `xiaovv`. Les éléments identiques sont conservés ; un service
+actif est redémarré seulement après une modification.
+
+L'accès SSH par clé et `sudo -n true` doivent fonctionner avant le premier
+déploiement. La clé locale déjà créée est `config/rpi/ssh/id_ed25519`.
+Les secrets de Run, du fichier local de variables et le mot de passe HTTPS
+chiffré sous Windows sont repris sans les afficher ni les inclure dans l'archive.
+Les fichiers du service sont sous `/opt/xiaovv`, `/etc/xiaovv` et `/var/lib/xiaovv`.
+Le Java 17 du système reste disponible. Pour conserver les changements de
+configuration faits sur le Pi, passer `-Prpi.syncConfig=false`.
+
+L'accès public nécessite la redirection **8443/TCP vers l'IP du Pi**.
+
 ## Documentation
 
 | Document | Contenu |
 |---|---|
 | [Configuration](docs/CONFIGURATION.md) | fichiers, caméras, secrets, FFmpeg |
 | [API HTTP](docs/API.md) | routes HTTP actuelles |
-| [Interface Web](docs/WEB-UI.md) | dashboard, mur, actions, stockage navigateur |
+| [Interface Web](docs/WEB-UI.md) | dashboard, son, actions communes/personnelles, transfert |
+| [HTTPS](docs/HTTPS.md) | certificat, port HTTPS séparé, accès Internet |
 | [MQTT](docs/MQTT.md) | brokers, bulles, secrets, diagnostic |
 | [Google Cast](docs/CAST.md) | pipeline DASH, prérequis et dépannage |
 | [Architecture](docs/ARCHITECTURE.md) | composants et flux internes |
@@ -214,6 +250,7 @@ Voir [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 | Caméra V380 native | `8800/TCP` | côté caméra |
 | Xiaovv RTSP | `8555/TCP` | RTP interleaved |
 | Xiaovv API / Web | `8080/TCP` | HTTP |
+| Xiaovv API / Web HTTPS | `8443/TCP` | facultatif, certificat externe |
 
 ## MediaMTX
 
@@ -226,12 +263,12 @@ Voir [README-MEDIAMTX.md](README-MEDIAMTX.md).
 ## Limites actuelles importantes
 
 - pas de RTP/UDP côté serveur RTSP ;
-- pas d’authentification RTSP ;
-- pas de HTTPS/TLS intégré pour l’API HTTP ;
+- authentification RTSP des lecteurs distants ; transport non chiffré réservé au LAN/VPN ;
+- HTTPS facultatif avec un certificat externe ; renouvellement à gérer au déploiement ;
 - Cast actuellement **vidéo seule** ;
 - le décodage Web direct du H.265 dépend toujours du client ;
 - les bulles MQTT utilisent des topics exacts : `#` et `+` ne sont pas acceptés ;
-- les boutons HTTP et les bulles d’information sont principalement configurés dans le navigateur ;
+- les anciennes définitions du navigateur nécessitent un import depuis **Boutons et infos** ;
 - l’endpoint d’action HTTP doit être considéré comme une fonction puissante à réserver à un LAN de confiance.
 
 ## Avertissement

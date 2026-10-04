@@ -208,7 +208,8 @@ class CameraRuntimeManager(
         val stream =
             rtspServer.createStream(
                 name =
-                    camera.streamName
+                    camera.streamName,
+                cameraId = camera.id
             )
 
         try {
